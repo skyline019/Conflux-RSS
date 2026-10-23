@@ -1,0 +1,68 @@
+{
+  "name": "conflux-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "汇阅电脑版。自带 SQLite，不连接网页版数据库。",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "vite build && electron .",
+    "server": "node --experimental-sqlite server.mjs",
+    "ui": "vite build",
+    "release": "vite build && electron-builder --win nsis --publish never"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^26.1.0",
+    "lucide-react": "^1.58.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "rss-parser": "^3.13.0",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.17",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^37.4.0",
+    "electron-builder": "^26.15.3",
+    "tailwindcss": "^4.1.17",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.9"
+  },
+  "build": {
+    "appId": "app.conflux.desktop",
+    "productName": "汇阅",
+    "executableName": "Conflux",
+    "asar": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "server.mjs",
+      "fulltext.mjs",
+      "media.mjs",
+      "discover.mjs",
+      "catalog.mjs",
+      "build/icon.ico",
+      "public/**/*",
+      "package.json",
+      "!data/**",
+      "!release/**"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "汇阅 Conflux"
+    }
+  }
+}

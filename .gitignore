@@ -1,0 +1,48 @@
+# dependencies
+node_modules/
+mobile/node_modules/
+desktop/node_modules/
+
+# env & secrets
+.env
+.env.*
+!.env.example
+**/keystore.properties
+**/*.keystore
+**/*.jks
+**/local.properties
+
+# build / cache
+.next/
+dist/
+out/
+build/
+*.tsbuildinfo
+.turbo/
+.cache/
+
+# mobile android
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/capacitor-cordova-android-plugins/build/
+mobile/dist/
+mobile/apk/*.apk
+!mobile/apk/.gitkeep
+
+# desktop packaging
+desktop/data/
+desktop/release/
+desktop/public/assets/
+
+# logs & OS
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# test / coverage
+coverage/
+.nyc_output/

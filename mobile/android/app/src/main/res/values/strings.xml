@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">汇阅</string>
+    <string name="title_activity_main">汇阅</string>
+    <string name="package_name">app.conflux.mobile</string>
+    <string name="custom_url_scheme">app.conflux.mobile</string>
+</resources>

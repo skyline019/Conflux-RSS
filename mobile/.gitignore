@@ -1,0 +1,12 @@
+node_modules
+dist
+apk/*.apk
+!apk/.gitkeep
+android/.gradle
+android/app/build
+android/build
+android/local.properties
+android/keystore.properties
+android/*.keystore
+android/*.jks
+*.log

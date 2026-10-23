@@ -1,0 +1,7 @@
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+-keep class com.getcapacitor.** { *; }
+-keep class app.conflux.mobile.** { *; }
+-keep class androidx.work.** { *; }
+-dontwarn com.getcapacitor.**
+-dontwarn androidx.work.**

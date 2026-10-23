@@ -1,0 +1,9 @@
+@import "../src/app/globals.css";
+@source "../src";
+@source ".";
+
+/* Android draws the page under the status bar. Keep taps below it. */
+@media (max-width: 1023px) {
+  #root { height: 100dvh; padding-top: 48px; box-sizing: border-box; }
+  #root > div { height: 100% !important; }
+}

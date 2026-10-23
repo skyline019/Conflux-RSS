@@ -1,170 +1,151 @@
-# 汇阅 · Conflux RSS
+# 汇阅 · Conflux
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Strict CI](https://github.com/skyline019/Conflux-RSS/actions/workflows/ci.yml/badge.svg)](https://github.com/skyline019/Conflux-RSS/actions/workflows/ci.yml)
-[![Android](https://img.shields.io/badge/Android-侧载_APK-3DDC84?logo=android)](https://github.com/skyline019/Conflux-RSS/releases)
-[![Platform](https://img.shields.io/badge/main-手机端_Capacitor-orange)](#手机端-android主分支)
+[![Strict CI](https://github.com/skyline019/Conflux-RSS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/skyline019/Conflux-RSS/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/skyline019/Conflux-RSS?label=APK)](https://github.com/skyline019/Conflux-RSS/releases/latest)
+[![Platform](https://img.shields.io/badge/main-Android_·_Capacitor-3DDC84?logo=android)](#install)
 
-**本地优先的 AI RSS 阅读器。**  
-主分支面向 **Android 手机端**：订阅、全文抓取、事件聚类、流式摘要与文内问答；数据存本机 **sql.js**，**无账号、无云同步**。
+**Local-first AI RSS reader for Android.**  
+订阅、全文、聚类、流式摘要与问答；数据在本机 **sql.js**，**无账号、无云同步**。
 
-> 仓库：[skyline019/Conflux-RSS](https://github.com/skyline019/Conflux-RSS)  
-> 最新手机端安装包见 [Releases](https://github.com/skyline019/Conflux-RSS/releases)。
-
----
-
-## 功能亮点（手机端）
-
-| 能力 | 说明 |
-|------|------|
-| **今日首页** | 按源分组未读、失败源提示、下拉/一键全量刷新 |
-| **阅读体验** | 阅读进度、「未读完」、系统分享出入、应用内打开原文 |
-| **全文与媒体** | 自动/按需抓全文；YouTube / B 站等专项抽取 |
-| **可选大模型** | OpenAI 兼容流式摘要与提问；API Key 存 Preferences |
-| **后台刷新** | WorkManager + 前台服务；通知显示进度与完成；304 跳过未变源 |
-| **备份** | sqlite / OPML / 诊断导出导入 |
-| **安全默认** | 默认禁明文 HTTP；签名 Release；侧载自用 |
+| | |
+|:--|:--|
+| **安装包** | [Releases · 最新 APK](https://github.com/skyline019/Conflux-RSS/releases/latest) |
+| **文档** | [用户指南](./mobile/docs/USER_GUIDE.md) · [架构](./mobile/docs/ARCHITECTURE.md) · [作品说明](./mobile/docs/PORTFOLIO.md) |
+| **当前版本** | **0.2.3** · `app.conflux.mobile` · versionCode **5** |
 
 ---
 
-## 仓库结构与分支
+## Features
 
-| 分支 | 定位 |
-|------|------|
-| **`main`**（默认） | **手机端** Capacitor Android + 共享 UI |
-| **`web`** | 电脑端 / Next.js + Postgres 网页版 |
-| **`desktop`** | 桌面 Electron 壳 |
-
-```text
-.
-├── mobile/                 # Android（Capacitor 7 + Vite）← 主交付
-│   ├── src/                # 本地 API shim、sql.js、原生桥
-│   ├── android/            # 原生工程（WorkManager / FGS）
-│   ├── docs/               # 用户指南 · 架构 · 发布 · 作品说明
-│   └── apk/                # 构建产物目录（APK 经 Release 分发）
-├── src/                    # 共享 React UI（网页 / 手机共用）
-├── desktop/                # Electron 桌面（见 desktop 分支说明）
-├── drizzle/ · Dockerfile   # 网页端 Postgres 相关（见 web 分支）
-└── README.md               # 本文件（手机端为主）
-```
-
-手机端详细文档：[`mobile/docs/`](./mobile/docs/README.md)
+- **今日首页** — 按源分组未读、失败源提示、一键全量刷新  
+- **阅读** — 进度记忆、「未读完」、系统分享、应用内打开原文  
+- **全文 / 媒体** — 自动或按需抓全文；YouTube / B 站专项  
+- **可选 LLM** — OpenAI 兼容流式摘要与文内提问（Key 存 Preferences）  
+- **后台刷新** — WorkManager + 前台服务；通知显示进度 / 完成；HTTP 304 跳过未变源  
+- **备份** — sqlite / OPML / 诊断导出导入  
+- **默认安全** — 禁明文 HTTP、签名 Release、侧载自用  
 
 ---
 
-## 快速开始（手机端）
+## Install
 
-### 环境
+1. 打开 [最新 Release](https://github.com/skyline019/Conflux-RSS/releases/latest)  
+2. 下载 `conflux-*-release.apk`  
+3. 允许「未知来源」后安装  
 
-- Node.js **20+**
-- **JDK 21**
-- Android SDK（`ANDROID_HOME`）
+覆盖升级：安装更高 **versionCode** 的同包名 APK，本地库一般保留。  
+日常用法见 [USER_GUIDE.md](./mobile/docs/USER_GUIDE.md)。
 
-### 开发
+> 部分机型后台刷新可能被省电策略推迟；通知若提示「点按以继续」，点一下进度通知即可。
+
+---
+
+## Quick start (dev)
+
+**环境：** Node 20+ · **JDK 21** · Android SDK  
 
 ```bash
 git clone git@github.com:skyline019/Conflux-RSS.git
-cd Conflux-RSS
-cd mobile
+cd Conflux-RSS/mobile
 npm install
-npm run dev          # 浏览器调试本地 API + UI
-npm test             # 路由冒烟
-npm run android      # vite build && cap sync
+npm run dev          # 浏览器调试
+npm run ci           # typecheck + test + build（与 CI 对齐）
 ```
 
-### 签名 Release APK
+签名 APK（勿提交 keystore）：
 
 ```bash
-cd mobile
-npm run keystore     # 仅首次：生成本地 keystore（勿提交）
+npm run keystore     # 仅首次
 npm run apk:release  # → apk/conflux-<version>-release.apk
 ```
 
-安装需允许「未知来源」。覆盖升级依赖更高的 `versionCode`。
-
-当前版本：**0.2.3**（详见 [CHANGELOG](./mobile/docs/CHANGELOG.md)）。
-
 ---
 
-## 架构（手机端一览）
+## Architecture
 
 ```text
-Android App
-  Splash / Share / Notifications / WorkManager
+Android (Splash · Share · Notifications · WorkManager)
   └─ Capacitor WebView
-       ├─ 共享 UI（../src，标记 __CONFLUX_MOBILE__）
-       ├─ window.fetch → /api/* 拦截
-       │     └─ mobile/src/api.ts（本地实现）
+       ├─ Shared UI  (../src , __CONFLUX_MOBILE__)
+       ├─ fetch /api/* → mobile/src/api.ts
        └─ sql.js ↔ IndexedDB
-外网：HTTPS RSS / 原文 / 可选 LLM
+HTTPS → RSS / 原文 / 可选 LLM
 ```
 
-要点：
-
-- **不连**作者服务器或网页版 Postgres  
+- 不连接作者服务器或网页版 Postgres  
 - 全量刷新：多源并发 + ETag/304 + 批量落盘  
-- 后台：软唤醒减闪屏；OEM 拦截时点进度通知继续  
+- 后台：进程内软唤醒；OEM 拦截时靠通知 PendingIntent 兜底  
 
-更多：[ARCHITECTURE.md](./mobile/docs/ARCHITECTURE.md)
-
----
-
-## 设计取舍
-
-| 做了 | 刻意不做 |
-|------|----------|
-| 离线本地库 | 云同步 / 账号体系 |
-| 签名侧载 APK | Play / 应用宝上架全套 |
-| WorkManager 静默刷新 | 无限后台常驻 |
-| 与网页共享 UI | 另起一套原生 UI |
+详解：[ARCHITECTURE.md](./mobile/docs/ARCHITECTURE.md)
 
 ---
 
-## 隐私
+## Repository layout
 
-- 订阅与正文仅存本机  
-- LLM Key 存系统 Preferences（启用 AI 时内容发往你配置的服务商）  
-- 详见 [PRIVACY.md](./mobile/docs/PRIVACY.md)
+| Branch | Role |
+|--------|------|
+| **`main`** (default) | **Android** · Capacitor + shared UI |
+| `web` | Next.js + Postgres |
+| `desktop` | Electron |
+
+```text
+mobile/          # primary deliverable
+  src/           # local API, sql.js, native bridge
+  android/       # WorkManager / FGS
+  docs/          # guides & portfolio
+src/             # shared React UI
+desktop/         # Electron (see desktop branch)
+```
 
 ---
 
-## 作品集 / 演示
+## Design trade-offs
 
-- [作品说明](./mobile/docs/PORTFOLIO.md)  
-- [演示脚本（30～90 秒）](./mobile/docs/DEMO_SCRIPT.md)  
+| Done | Intentionally not |
+|------|-------------------|
+| Offline local DB | Cloud sync / accounts |
+| Signed sideload APK | Play Store full pipeline |
+| WorkManager quiet refresh | Unlimited always-on background |
+| Shared Web UI | Separate native UI rewrite |
 
 ---
 
-## 严格 CI
+## Strict CI
 
-GitHub Actions **Strict CI**（`.github/workflows/ci.yml`），门禁全部通过才算绿：
+Every push/PR on `main` must pass **all** gates (no `continue-on-error`):
 
-1. **Hygiene** — 禁止密钥入库、版本号/schema 文档对齐（`scripts/ci-guard.mjs`）  
-2. **Mobile test** — `vitest`  
-3. **Mobile typecheck** — `tsc -p tsconfig.ci.json`  
-4. **Mobile build** — `vite build`  
-5. **Strict CI OK** — 汇总闸门（不可 `continue-on-error`）
-
-本地：
+1. Hygiene — no secrets tracked; version / schema docs aligned  
+2. Vitest — mobile route smoke  
+3. Typecheck — `tsc -p tsconfig.ci.json`  
+4. Vite build — production bundle  
+5. **Strict CI OK** — aggregator  
 
 ```bash
 node scripts/ci-guard.mjs
 cd mobile && npm run ci
 ```
 
-分支保护说明：[`.github/BRANCH_PROTECTION.md`](./.github/BRANCH_PROTECTION.md)
-
-## 许可证
-
-[MIT](./LICENSE) © skyline019
+Branch protection: [`.github/BRANCH_PROTECTION.md`](./.github/BRANCH_PROTECTION.md)
 
 ---
 
-## 相关分支
+## Privacy
 
-切换网页端或桌面端：
+- Articles stay on-device  
+- LLM keys in Preferences; enabling AI sends article text to **your** configured provider  
+- [PRIVACY.md](./mobile/docs/PRIVACY.md)
 
-```bash
-git checkout web       # 电脑 / Next.js
-git checkout desktop   # Electron 桌面
-```
+---
+
+## Portfolio / demo
+
+- [PORTFOLIO.md](./mobile/docs/PORTFOLIO.md)  
+- [DEMO_SCRIPT.md](./mobile/docs/DEMO_SCRIPT.md)（30–90s）  
+- [CHANGELOG.md](./mobile/docs/CHANGELOG.md)
+
+---
+
+## License
+
+[MIT](./LICENSE) © [skyline019](https://github.com/skyline019)

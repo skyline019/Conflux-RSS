@@ -8,10 +8,7 @@
 - 全量刷新源并发默认统一为 **8**  
 - 大库落盘：按体积加长 debounce/间隔；刷新期间 `beginBulkWrite` 合并一次 `saveNow`  
 - **Strict CI**：Hygiene → Vitest → typecheck → vite build → `Strict CI OK` 汇总闸门  
-
-## Unreleased
-
-（CI 与门禁相关改动随 0.2.3 仓库同步） 
+- 公开仓库 README / Release 说明精修  
 
 ## 0.2.2
 

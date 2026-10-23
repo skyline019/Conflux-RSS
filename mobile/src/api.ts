@@ -7,6 +7,7 @@ import { clearLlmApiKey, getLlmApiKey, setLlmApiKey } from "./secure";
 
 const COLORS = ["#ee802f", "#2563eb", "#7c3aed", "#059669", "#dc2626", "#0e7490", "#b45309", "#be185d", "#334155"];
 const nowIso = () => new Date().toISOString();
+const sqlText = (value: unknown): string | null => (value == null ? null : String(value));
 const DEFAULTS = {
   llmEnabled: false, llmProvider: "deepseek", llmBaseUrl: "https://api.deepseek.com/v1", llmApiKey: "", llmModel: "deepseek-chat",
   autoFullText: true, fullTextPerFeedLimit: 3, autoSummary: false,
@@ -589,15 +590,29 @@ function keywordsOf(title: string, body: string) {
   return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([word]) => word);
 }
 function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total: number }) => void) {
+  type ClusterRow = {
+    id: number;
+    title: string;
+    feedId: number;
+    time: number;
+    grams: Set<string>;
+    keywords: string[];
+    entities: Set<string>;
+  };
   const current = settings();
   const threshold = Number(current.clusterThreshold) || 0.27;
   const windowMs = (Number(current.clusterWindowHours) || 96) * 2 * 3600 * 1000;
   const raw = all<Row>(`select id, title, feed_id as feedId, substr(coalesce(content, rss_summary, ''), 1, 500) as body, coalesce(published_at, created_at) as seen from articles where length(title) >= 4 order by seen desc`);
-  const rows = raw.map((row, i) => {
+  const rows: ClusterRow[] = raw.map((row, i) => {
     if (i % 40 === 0) onProgress?.({ phase: "keywords", done: i, total: raw.length });
     run("update articles set keywords = ? where id = ?", [JSON.stringify(keywordsOf(String(row.title), String(row.body || ""))), Number(row.id)]);
     return {
-      ...row, time: row.seen ? Date.parse(String(row.seen)) || 0 : 0, grams: bigramSet(String(row.title)), keywords: keywordsOf(String(row.title), String(row.body || "")),
+      id: Number(row.id),
+      title: String(row.title),
+      feedId: Number(row.feedId),
+      time: row.seen ? Date.parse(String(row.seen)) || 0 : 0,
+      grams: bigramSet(String(row.title)),
+      keywords: keywordsOf(String(row.title), String(row.body || "")),
       entities: new Set([...String(row.title).matchAll(/[A-Za-z][A-Za-z0-9-]{2,}|\d+(?:\.\d+)?%?/g)].map((match) => match[0].toLowerCase()).filter((item) => !/^\d$/.test(item))),
     };
   });
@@ -624,13 +639,14 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
   };
   exec("update articles set cluster_id = null");
   exec("delete from clusters");
-  const buckets: { members: typeof rows }[] = [];
-  const recent: (typeof rows[number] & { bucket: { members: typeof rows } })[] = [];
+  type Bucket = { members: ClusterRow[] };
+  const buckets: Bucket[] = [];
+  const recent: (ClusterRow & { bucket: Bucket })[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (i % 25 === 0) onProgress?.({ phase: "link", done: i, total: rows.length });
     while (recent.length && recent[recent.length - 1].time - row.time > windowMs) recent.pop();
-    let best: { members: typeof rows } | null = null;
+    let best: Bucket | null = null;
     let bestScore = 0;
     const seen = new Set<object>();
     for (const other of recent) {
@@ -640,7 +656,7 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
       for (const member of other.bucket.members.slice(0, 5)) score = Math.max(score, scoreOf(row, member));
       if (score > bestScore) { bestScore = score; best = other.bucket; }
     }
-    const bucket = best && bestScore >= threshold ? best : { members: [] as typeof rows };
+    const bucket: Bucket = best && bestScore >= threshold ? best : { members: [] };
     if (bucket !== best) buckets.push(bucket);
     bucket.members.unshift(row);
     recent.unshift(Object.assign(row, { bucket }));
@@ -666,7 +682,7 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
     if (!stat || Number(stat.n) < 2) { run("update articles set cluster_id = null where cluster_id = ?", [cluster.id]); run("delete from clusters where id = ?", [cluster.id]); continue; }
     const titles = all<{ title: string }>("select title from articles where cluster_id = ?", [cluster.id]).map((row) => row.title);
     const title = titles.slice().sort((a, b) => Math.abs(a.length - 26) - Math.abs(b.length - 26))[0];
-    run("update clusters set title = ?, article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [title, Number(stat.n), Number(stat.sources), stat.firstSeen, stat.lastSeen, cluster.id]);
+    run("update clusters set title = ?, article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [title, Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), cluster.id]);
   }
   return { clusters: Number(get<{ n: number }>("select count(*) as n from clusters")?.n || 0), assigned };
 }
@@ -698,7 +714,7 @@ function analyzeArticleCluster(articleId: number) {
     run("update articles set cluster_id = ? where id = ?", [host, articleId]);
     for (const h of top.filter((item) => !item.clusterId)) run("update articles set cluster_id = ? where id = ?", [host, h.id]);
     const stat = get<Row>("select count(*) as n, count(distinct feed_id) as sources, min(coalesce(published_at, created_at)) as firstSeen, max(coalesce(published_at, created_at)) as lastSeen from articles where cluster_id = ?", [host]);
-    if (stat) run("update clusters set article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [Number(stat.n), Number(stat.sources), stat.firstSeen, stat.lastSeen, host]);
+    if (stat) run("update clusters set article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), host]);
     return { clusterId: host, matches };
   }
   const title = String(me.title).length <= top[0].title.length ? String(me.title) : top[0].title;
@@ -706,7 +722,7 @@ function analyzeArticleCluster(articleId: number) {
   run("update articles set cluster_id = ? where id = ?", [clusterId, articleId]);
   for (const h of top) run("update articles set cluster_id = ? where id = ?", [clusterId, h.id]);
   const stat = get<Row>("select count(*) as n, count(distinct feed_id) as sources, min(coalesce(published_at, created_at)) as firstSeen, max(coalesce(published_at, created_at)) as lastSeen from articles where cluster_id = ?", [clusterId]);
-  if (stat) run("update clusters set article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [Number(stat.n), Number(stat.sources), stat.firstSeen, stat.lastSeen, clusterId]);
+  if (stat) run("update clusters set article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), clusterId]);
   return { clusterId, matches };
 }
 
@@ -899,9 +915,9 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
     }
     const articleMatch = path.match(/^\/api\/articles\/(\d+)$/);
     if (articleMatch && method === "GET") {
-      const article = articleFull(Number(articleMatch[1]));
+      const article = articleFull(Number(articleMatch[1])) as (ReturnType<typeof articleFull> & { id: number; isRead?: boolean }) | null;
       if (!article) return json(404, { error: "文章不存在" });
-      if (!article.isRead) run("update articles set is_read = 1, read_at = ? where id = ?", [nowIso(), article.id as number]);
+      if (!article.isRead) run("update articles set is_read = 1, read_at = ? where id = ?", [nowIso(), article.id]);
       article.isRead = true;
       return json(200, article);
     }

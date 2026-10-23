@@ -10,7 +10,9 @@
     "apk:release": "node scripts/apk-release.mjs",
     "keystore": "node scripts/ensure-keystore.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.ci.json",
+    "ci": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.3",

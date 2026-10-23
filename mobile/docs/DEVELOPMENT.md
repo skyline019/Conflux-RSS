@@ -20,8 +20,13 @@ npm install
 npm run dev          # http://127.0.0.1:5176 （浏览器调试 UI + 本地 API）
 npm run android      # vite build && cap sync android
 npm test             # 路由覆盖冒烟
+npm run typecheck    # tsc（mobile/src，CI 门禁）
+npm run ci           # typecheck + test + build
 npm run apk:release  # 签名 Release APK → apk/
 ```
+
+仓库根目录：`node scripts/ci-guard.mjs`（密钥/版本/schema 守卫）。  
+GitHub：**Strict CI** → 最终 check 名 `Strict CI OK`（见 `.github/BRANCH_PROTECTION.md`）。
 
 用 Android Studio 打开 `mobile/android` 可跑模拟器/真机 Debug。
 

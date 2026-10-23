@@ -39,10 +39,13 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "../src"),
+      // Shared UI lives in ../src; force deps into mobile/node_modules (CI has no root install).
       react: path.resolve(__dirname, "node_modules/react"),
       "react-dom": path.resolve(__dirname, "node_modules/react-dom"),
+      "lucide-react": path.resolve(__dirname, "node_modules/lucide-react"),
+      "hls.js": path.resolve(__dirname, "node_modules/hls.js"),
     },
-    dedupe: ["react", "react-dom"],
+    dedupe: ["react", "react-dom", "lucide-react"],
   },
   server: { port: 5176, strictPort: true },
 });

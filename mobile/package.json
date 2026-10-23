@@ -27,6 +27,7 @@
     "@capacitor/splash-screen": "^7.0.5",
     "@capacitor/status-bar": "^7.0.6",
     "@mozilla/readability": "^0.6.0",
+    "hls.js": "^1.7.3",
     "lucide-react": "^1.58.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

@@ -1,6 +1,7 @@
 # 汇阅 · Conflux RSS
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Strict CI](https://github.com/skyline019/Conflux-RSS/actions/workflows/ci.yml/badge.svg)](https://github.com/skyline019/Conflux-RSS/actions/workflows/ci.yml)
 [![Android](https://img.shields.io/badge/Android-侧载_APK-3DDC84?logo=android)](https://github.com/skyline019/Conflux-RSS/releases)
 [![Platform](https://img.shields.io/badge/main-手机端_Capacitor-orange)](#手机端-android主分支)
 
@@ -133,6 +134,25 @@ Android App
 - [演示脚本（30～90 秒）](./mobile/docs/DEMO_SCRIPT.md)  
 
 ---
+
+## 严格 CI
+
+GitHub Actions **Strict CI**（`.github/workflows/ci.yml`），门禁全部通过才算绿：
+
+1. **Hygiene** — 禁止密钥入库、版本号/schema 文档对齐（`scripts/ci-guard.mjs`）  
+2. **Mobile test** — `vitest`  
+3. **Mobile typecheck** — `tsc -p tsconfig.ci.json`  
+4. **Mobile build** — `vite build`  
+5. **Strict CI OK** — 汇总闸门（不可 `continue-on-error`）
+
+本地：
+
+```bash
+node scripts/ci-guard.mjs
+cd mobile && npm run ci
+```
+
+分支保护说明：[`.github/BRANCH_PROTECTION.md`](./.github/BRANCH_PROTECTION.md)
 
 ## 许可证
 

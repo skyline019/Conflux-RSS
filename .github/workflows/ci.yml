@@ -1,0 +1,126 @@
+# Strict CI — every gate must pass; no continue-on-error.
+name: Strict CI
+
+on:
+  push:
+    branches: [main, web, desktop]
+  pull_request:
+    branches: [main, web, desktop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: Hygiene (secrets / versions)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: CI guard
+        run: |
+          set -euo pipefail
+          node scripts/ci-guard.mjs
+
+  mobile-test:
+    name: Mobile test (vitest)
+    needs: hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install
+        run: |
+          set -euo pipefail
+          npm ci
+      - name: Vitest
+        run: |
+          set -euo pipefail
+          npm test
+
+  mobile-typecheck:
+    name: Mobile typecheck (src)
+    needs: hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install
+        run: |
+          set -euo pipefail
+          npm ci
+      - name: tsc --noEmit -p tsconfig.ci.json
+        run: |
+          set -euo pipefail
+          npx tsc --noEmit -p tsconfig.ci.json
+
+  mobile-build:
+    name: Mobile build (vite)
+    needs: hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install
+        run: |
+          set -euo pipefail
+          npm ci
+      - name: Vite production build
+        run: |
+          set -euo pipefail
+          npm run build
+      - name: Dist not empty
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          test -d dist/assets
+
+  ci-ok:
+    name: Strict CI OK
+    if: always()
+    needs: [hygiene, mobile-test, mobile-typecheck, mobile-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all gates success
+        run: |
+          set -euo pipefail
+          echo "hygiene=${{ needs.hygiene.result }}"
+          echo "mobile-test=${{ needs.mobile-test.result }}"
+          echo "mobile-typecheck=${{ needs.mobile-typecheck.result }}"
+          echo "mobile-build=${{ needs.mobile-build.result }}"
+          test "${{ needs.hygiene.result }}" = "success"
+          test "${{ needs.mobile-test.result }}" = "success"
+          test "${{ needs.mobile-typecheck.result }}" = "success"
+          test "${{ needs.mobile-build.result }}" = "success"

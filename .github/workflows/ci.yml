@@ -83,25 +83,27 @@ jobs:
     needs: hygiene
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: mobile
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: mobile/package-lock.json
-      - name: Install
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+      - name: Install mobile deps
+        working-directory: mobile
         run: |
           set -euo pipefail
           npm ci
       - name: Vite production build
+        working-directory: mobile
         run: |
           set -euo pipefail
           npm run build
       - name: Dist not empty
+        working-directory: mobile
         run: |
           set -euo pipefail
           test -f dist/index.html

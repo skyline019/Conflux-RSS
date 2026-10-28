@@ -1,10 +1,11 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Star, Archive, ExternalLink, Sparkles, FileText, Trash2, Check, FolderPlus,
   Layers, Copy, ChevronDown, BookOpen, Clock3, Hash, Undo2, PlayCircle, Tv,
   Images, ZoomIn, ZoomOut, RotateCcw, ChevronLeft, ChevronRight, X, Sun, Moon,
-  PictureInPicture2, Volume2, Link2, Type, Share2, MoreHorizontal, ChevronLeft,
+  PictureInPicture2, Volume2, Link2, Type, Share2, MoreHorizontal,
 } from "lucide-react";
 import type { ArticleFull, CollectionRow, MediaItem } from "@/lib/client";
 import { api, fmtDateTime, timeAgo, DUP_REASON, FULLTEXT_LABEL, stanceColor, stanceLabel, proxiedImg } from "@/lib/client";
@@ -454,8 +455,7 @@ export default function Reader(p: Props) {
     <section className={`flex min-w-0 flex-1 flex-col ${dark ? "bg-[#141210]" : "bg-[#fffdf8]"}`}>
       {/* toolbar — sticky; icon back + primary actions; overflow sheet on mobile */}
       <div
-        className={`sticky top-0 z-20 flex items-center gap-0.5 border-b px-2 pb-1.5 backdrop-blur-md sm:px-3 sm:py-2 ${barCls}`}
-        style={isMobile ? { paddingTop: "max(0.375rem, env(safe-area-inset-top))" } : undefined}
+        className={`sticky top-0 z-20 flex items-center gap-0.5 border-b px-2 py-1.5 backdrop-blur-md sm:px-3 sm:py-2 ${barCls}`}
       >
         {p.onBack && (
           <button
@@ -578,7 +578,7 @@ export default function Reader(p: Props) {
             <ToolBtn icon={<Trash2 size={15} />} label="删除" onClick={remove} />
           </div>
 
-          {/* mobile: overflow bottom sheet */}
+          {/* mobile: overflow trigger; sheet portaled to body (avoid blur containing-block) */}
           <div className="relative md:hidden">
             <button
               type="button"
@@ -589,15 +589,20 @@ export default function Reader(p: Props) {
             >
               <MoreHorizontal size={18} />
             </button>
-            {showMoreTools && (
-              <>
-                <div className="fixed inset-0 z-40 bg-black/45" onClick={() => setShowMoreTools(false)} />
+            {showMoreTools && typeof document !== "undefined" && createPortal(
+              <div
+                className="anim-fadeIn fixed inset-0 z-[70] flex items-end justify-center bg-black/45"
+                onClick={() => setShowMoreTools(false)}
+                role="presentation"
+              >
                 <div
-                  className={`anim-fadeUp fixed inset-x-0 bottom-0 z-50 rounded-t-2xl border-t px-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 shadow-2xl ${
+                  className={`anim-fadeUp w-full max-h-[min(85dvh,720px)] overflow-y-auto rounded-t-2xl border-t px-2 pt-2 shadow-2xl ${
                     dark ? "border-white/10 bg-[#1f1b17] text-[#f3eee3]" : "border-[#e3dccb] bg-white text-[#4c4433]"
                   }`}
+                  style={{ paddingBottom: "max(4.5rem, calc(env(safe-area-inset-bottom) + 3.5rem))" }}
                   role="dialog"
                   aria-label="更多操作"
+                  onClick={(e) => e.stopPropagation()}
                 >
                   <div className={`mx-auto mb-2 h-1 w-10 rounded-full ${dark ? "bg-white/25" : "bg-[#e3dccb]"}`} />
                   {[
@@ -623,18 +628,38 @@ export default function Reader(p: Props) {
                     </button>
                   ))}
                 </div>
-              </>
+              </div>,
+              document.body,
             )}
-            {showCollections && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setShowCollections(false)} />
-                <div className="anim-fadeUp absolute right-0 top-12 z-20 w-56 rounded-xl border border-[#e3dccb] bg-white p-1.5 shadow-xl">
-                  <div className="px-2 pb-1 pt-1.5 text-[11px] font-semibold text-[#9a917c]">归档到合集</div>
-                  {p.collections.length === 0 && <div className="px-2 py-2 text-[12px] text-[#9a917c]">暂无合集</div>}
+            {showCollections && typeof document !== "undefined" && createPortal(
+              <div
+                className="anim-fadeIn fixed inset-0 z-[70] flex items-end justify-center bg-black/45"
+                onClick={() => setShowCollections(false)}
+                role="presentation"
+              >
+                <div
+                  className={`anim-fadeUp w-full max-w-md rounded-t-2xl border-t p-3 shadow-2xl ${
+                    dark ? "border-white/10 bg-[#1f1b17] text-[#f3eee3]" : "border-[#e3dccb] bg-white text-[#4c4433]"
+                  }`}
+                  style={{ paddingBottom: "max(4.5rem, calc(env(safe-area-inset-bottom) + 3.5rem))" }}
+                  role="dialog"
+                  aria-label="归档到合集"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className={`mx-auto mb-2 h-1 w-10 rounded-full ${dark ? "bg-white/25" : "bg-[#e3dccb]"}`} />
+                  <div className="px-2 pb-2 pt-1 text-[13px] font-semibold">归档到合集</div>
+                  {p.collections.length === 0 && <div className="px-2 py-3 text-[12.5px] text-[#9a917c]">暂无合集</div>}
                   {p.collections.map((c) => {
                     const inCol = article.collectionIds.includes(c.id);
                     return (
-                      <button key={c.id} onClick={() => toggleCollection(c.id)} className="flex min-h-[44px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] hover:bg-[#faf5e8]">
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => toggleCollection(c.id)}
+                        className={`flex min-h-[48px] w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] ${
+                          dark ? "hover:bg-white/8" : "hover:bg-[#faf5e8]"
+                        }`}
+                      >
                         <span className="h-2.5 w-2.5 rounded-[4px]" style={{ background: c.color }} />
                         <span className="flex-1">{c.name}</span>
                         {inCol && <Check size={13} className="text-[#4c7a57]" />}
@@ -642,7 +667,8 @@ export default function Reader(p: Props) {
                     );
                   })}
                 </div>
-              </>
+              </div>,
+              document.body,
             )}
           </div>
         </div>

@@ -143,13 +143,18 @@ describe("source-guards-no-truncation-paths", () => {
     const cluster = readFileSync(join(__dirname, "../../src/lib/cluster.ts"), "utf8");
     expect(cluster).not.toMatch(/limit\(800\)/);
     expect(cluster).not.toMatch(/30 \* 24 \* 3600/);
-    expect(cluster).toContain("buildCandidatePairs");
+    expect(cluster).toContain("linkClustersFromCorpus");
+    expect(cluster).toContain("selectConsistentClusterMatches");
+    expect(cluster).toContain("clusterEdgeOk");
     expect(cluster).toContain("feedId === me.feedId");
 
     const llm = readFileSync(join(__dirname, "../../src/lib/llm.ts"), "utf8");
     expect(llm).not.toMatch(/slice\(0,\s*3500\)/);
     expect(llm).toContain("fullBody");
     expect(llm).toContain("batchFullArticles");
+    expect(llm).toContain("extractClaimPoints");
+    expect(llm).toContain("sanitizeComparisonFields");
+    expect(llm).not.toMatch(/keyPoints:\s*extractKeywords\(/);
 
     const route = readFileSync(join(__dirname, "../../src/app/api/clusters/[id]/compare/route.ts"), "utf8");
     expect(route).toContain("selectCrossFeedArticlesForCompare");
@@ -177,13 +182,33 @@ describe("source-guards-no-truncation-paths", () => {
     expect(mobile).toContain("coalesce(content, rss_summary, '') as body");
     expect(mobile).not.toMatch(/substr\(coalesce\(content/);
     expect(mobile).toContain("linkClustersFromCorpus");
-    expect(mobile).toContain("eventSimilarity");
+    expect(mobile).toContain("clusterEdgeOk");
+    expect(mobile).toContain("selectConsistentClusterMatches");
     expect(mobile).toContain("Number(stat.sources) < 2");
 
     const core = readFileSync(join(__dirname, "../../src/lib/clusterCore.ts"), "utf8");
     expect(core).toContain("buildCandidatePairs");
     expect(core).toContain("eventSimilarity");
+    expect(core).toContain("passesEventClusterGate");
     expect(core).toContain("distinctFeeds < 2");
+
+    const stance = readFileSync(join(__dirname, "../../src/lib/stanceTimeline.ts"), "utf8");
+    expect(stance).not.toMatch(/from ["'].*articleSearch["']/);
+    expect(stance).not.toMatch(/searchTokenize\s*\(/);
+    expect(stance).toContain("extractClaimPoints");
+    expect(stance).toContain("isPlausibleActorName");
+    expect(stance).toContain("sanitizeComparisonFields");
+
+    const apiIngest = readFileSync(join(__dirname, "api.ts"), "utf8");
+    expect(apiIngest).toContain("extractKeywords");
+    expect(apiIngest).toMatch(/keywords.*stance_score|stance_score.*keywords/);
+    expect(apiIngest).toContain("clusterHealPending");
+    expect(apiIngest).toContain("sanitizeComparisonFields");
+
+    const reader = readFileSync(join(__dirname, "../../src/components/Reader.tsx"), "utf8");
+    expect(reader).toContain("createPortal");
+    expect(reader).toContain("z-[70]");
+    expect(reader).not.toMatch(/paddingTop:\s*"max\(0\.375rem,\s*env\(safe-area-inset-top\)\)"/);
   });
 
   it("mobile compare merges batches and enriches with external news", () => {
@@ -201,7 +226,7 @@ describe("source-guards-no-truncation-paths", () => {
   it("diagnostics appVersion comes from package.json", () => {
     const api = readFileSync(join(__dirname, "api.ts"), "utf8");
     const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
-    expect(pkg.version).toBe("0.2.7");
+    expect(pkg.version).toBe("0.2.8");
     expect(api).toContain("APP_VERSION");
     expect(api).toContain('import packageJson from "../package.json"');
     expect(api).not.toMatch(/appVersion:\s*"0\.2\.0"/);

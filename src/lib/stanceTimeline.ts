@@ -1,8 +1,10 @@
 /**
  * Multi-dimensional attitude + timeline from full article body.
  * Builds on stanceHeuristic valence; crypto-free for mobile vitest (no Node crypto).
+ * Analysis tokens MUST NOT reuse FTS searchTokenize — that path emits CJK unigrams.
  */
-import { searchTokenize } from "./articleSearch";
+import { extractiveSummary, extractKeywords } from "./textCore";
+import { isGenericClusterToken } from "./clusterCore";
 
 function sentencesOf(text: string): string[] {
   return (text || "")
@@ -10,6 +12,106 @@ function sentencesOf(text: string): string[] {
     .split(/(?<=[。！？!?\.])\s*/)
     .map((s) => s.trim())
     .filter((s) => s.length >= 12);
+}
+
+const MIN_CLAIM_LEN = 12;
+
+export type AttitudeLabel = "中立" | "客观" | "主观" | "积极" | "消极";
+
+/** Accept only clause-like claims — reject unigrams, path crumbs, pure years. */
+export function isQualityClaim(text: string): boolean {
+  const t = (text || "").trim();
+  if (t.length < MIN_CLAIM_LEN) return false;
+  // Reject punctuation/digit-only (do NOT use \W — it treats CJK as non-word)
+  if (/^[\d\s\p{P}\p{S}_]+$/u.test(t)) return false;
+  if (/^[a-z0-9][a-z0-9\-_./]{0,24}$/i.test(t) && !/\s/.test(t)) return false;
+  // single CJK char or two-char noise
+  if (/^[\u4e00-\u9fff]{1,2}$/.test(t)) return false;
+  if (/^独有关注：[「『].+[」』]$/.test(t) && t.length < 20) return false;
+  return true;
+}
+
+export function sentenceFingerprint(s: string): string {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .slice(0, 48);
+}
+
+/** Sentence-level key points for compare (never FTS unigrams). */
+export function extractClaimPoints(title: string, body: string, topN = 5): string[] {
+  const fromExtractive = extractiveSummary(title, body || "", Math.max(3, topN)).keyPoints
+    .map((s) => s.replace(/[。！？!?\.]+$/u, "").trim())
+    .filter(isQualityClaim);
+  if (fromExtractive.length >= 2) return fromExtractive.slice(0, topN);
+  const sents = sentencesOf(`${title}。${body || ""}`)
+    .map((s) => s.replace(/[。！？!?\.]+$/u, "").trim())
+    .filter(isQualityClaim);
+  const out: string[] = [];
+  for (const s of [...fromExtractive, ...sents]) {
+    if (out.some((x) => sentenceFingerprint(x) === sentenceFingerprint(s))) continue;
+    out.push(s.slice(0, 160));
+    if (out.length >= topN) break;
+  }
+  return out;
+}
+
+/** Exclusive claims across sources (set difference on sentence fingerprints). */
+export function exclusiveClaims(
+  mine: string[],
+  others: string[][],
+  topN = 4,
+): string[] {
+  const otherFp = new Set(others.flat().map(sentenceFingerprint).filter(Boolean));
+  const out: string[] = [];
+  for (const s of mine) {
+    if (!isQualityClaim(s)) continue;
+    const fp = sentenceFingerprint(s);
+    if (!fp || otherFp.has(fp)) continue;
+    out.push(s.slice(0, 160));
+    if (out.length >= topN) break;
+  }
+  return out;
+}
+
+/** Reject repo slugs, years-only, generic tech tokens as "actors". */
+export function isPlausibleActorName(name: string): boolean {
+  const n = (name || "").trim();
+  if (n.length < 2 || n.length > 40) return false;
+  if (isGenericClusterToken(n)) return false;
+  if (/^\d{2,4}$/.test(n)) return false;
+  if (/^[a-z0-9]+\/[a-z0-9._-]+$/i.test(n)) return false;
+  // short lowercase slug without spaces — usually repo / product fragment
+  if (/^[a-z0-9][a-z0-9\-_]{1,20}$/i.test(n) && !/\s/.test(n) && n.length <= 10) return false;
+  const techish = /^(agent|agents|qcon|openai|github|trending|cindy|makecindy|llm|gpt|api)$/i;
+  if (techish.test(n)) return false;
+  return true;
+}
+
+function describeNarrative(label: AttitudeLabel, objectivity: number, framing: string[]): string {
+  const frame = framing.slice(0, 3).join("、");
+  if (label === "客观" || objectivity >= 0.55) {
+    return frame ? `偏事实陈述，常见用语：${frame}` : "偏事实陈述与信息通报";
+  }
+  if (label === "主观") {
+    return frame ? `偏评价/评论叙述，倾向词：${frame}` : "偏评价与主观判断";
+  }
+  if (label === "积极") {
+    return frame ? `叙述偏积极，强调：${frame}` : "叙述态度偏积极";
+  }
+  if (label === "消极") {
+    return frame ? `叙述偏消极/质疑，强调：${frame}` : "叙述态度偏消极或质疑";
+  }
+  return frame ? `态度中立，可见框架词：${frame}` : "态度中立，未见鲜明框架词";
+}
+
+function describeTone(label: AttitudeLabel, objectivity: number): string {
+  if (label === "客观") return "语气克制、偏客观报道";
+  if (label === "主观") return "语气主观、带评价色彩";
+  if (label === "积极") return "语气偏积极";
+  if (label === "消极") return "语气偏消极或警惕";
+  if (objectivity >= 0.5) return "语气平稳";
+  return "语气中性";
 }
 
 const POS = ["突破", "增长", "成功", "利好", "创新高", "领先", "改善", "提升", "支持", "欢迎", "积极", "乐观", "强劲", "复苏", "共赢", "机遇", "里程碑", "点赞", "好评", "上涨", "盈利", "合作", "开放", "进步", "显著成效", "惠民"];
@@ -29,19 +131,13 @@ function extractEntitiesLite(title: string): string[] {
   const out = new Set<string>();
   const t = title || "";
   for (const m of t.matchAll(/[「『""《]([^」』""》]{2,12})[」』""》]/g)) out.add(m[1].toLowerCase());
-  for (const m of t.matchAll(/[A-Za-z][A-Za-z0-9\-]{2,}/g)) out.add(m[0].toLowerCase());
-  for (const m of t.matchAll(/\d+(?:\.\d+)?%?/g)) if (m[0].length >= 2) out.add(m[0]);
-  return [...out];
+  // Multi-word / capitalized org-like tokens only — not every EN word ≥3
+  for (const m of t.matchAll(/\b[A-Z][A-Za-z0-9\-]{2,}(?:\s+[A-Z][A-Za-z0-9\-]{2,})*\b/g)) {
+    out.add(m[0].toLowerCase());
+  }
+  for (const m of t.matchAll(/[「『]([^」』]{2,16})[」』]/g)) out.add(m[1].toLowerCase());
+  return [...out].filter(isPlausibleActorName);
 }
-
-function extractKeywordsLite(title: string, body: string, topN = 10): string[] {
-  const freq = new Map<string, number>();
-  for (const t of searchTokenize((body || "").slice(0, 6000))) freq.set(t, (freq.get(t) || 0) + 1);
-  for (const t of searchTokenize(title)) freq.set(t, (freq.get(t) || 0) + 3);
-  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN).map(([k]) => k);
-}
-
-export type AttitudeLabel = "中立" | "客观" | "主观" | "积极" | "消极";
 
 export type ActorAttitude = {
   actor: string;
@@ -137,20 +233,23 @@ export function extractActorAttitudes(title: string, body: string): ActorAttitud
   for (const { actor, aliases } of ACTOR_ALIASES) {
     const hits = sents.filter((s) => aliases.some((a) => s.includes(a)));
     if (!hits.length && !aliases.some((a) => title.includes(a))) continue;
-    const span = (hits[0] || title).slice(0, 120);
-    const st = stanceHeuristic(hits.join("。") || title);
-    const objectivity = scoreObjectivity(hits.join("。") || title);
+    const span = (hits[0] || title).slice(0, 160);
+    const joined = hits.join("。") || title;
+    const st = stanceHeuristic(joined);
+    const objectivity = scoreObjectivity(joined);
     out.push({
       actor,
       attitude: attitudeLabelFrom(st.score, objectivity),
       score: st.score,
       evidenceSpan: span,
+      summary: isQualityClaim(span) ? span : undefined,
+      evidenceQuotes: hits.slice(0, 2).filter(isQualityClaim).map((h) => h.slice(0, 100)),
     });
   }
-  // org-like entities from title
+  // org-like entities from title — only if plausible actor names
   for (const e of extractEntitiesLite(title).slice(0, 6)) {
-    if (out.some((a) => a.actor === e)) continue;
-    if (e.length < 2) continue;
+    if (out.some((a) => a.actor === e || a.actor.toLowerCase() === e.toLowerCase())) continue;
+    if (!isPlausibleActorName(e)) continue;
     const near = sents.filter((s) => s.toLowerCase().includes(e.toLowerCase())).slice(0, 3);
     if (!near.length) continue;
     const st = stanceHeuristic(near.join("。"));
@@ -159,10 +258,11 @@ export function extractActorAttitudes(title: string, body: string): ActorAttitud
       role: "实体",
       attitude: attitudeLabelFrom(st.score, scoreObjectivity(near.join("。"))),
       score: st.score,
-      evidenceSpan: near[0]?.slice(0, 120),
+      evidenceSpan: near[0]?.slice(0, 160),
+      summary: near[0] && isQualityClaim(near[0]) ? near[0].slice(0, 160) : undefined,
     });
   }
-  return out.slice(0, 12);
+  return out.filter((a) => isPlausibleActorName(a.actor)).slice(0, 12);
 }
 
 export function extractTimelineFromBody(
@@ -278,12 +378,16 @@ export function buildEventArcSkeleton(eventTitle: string, members: EventMemberIn
       source: m.feedTitle,
       publishedAt: m.publishedAt,
     });
-    return { m, a };
+    const claims = extractClaimPoints(m.title, m.body, 5);
+    return { m, a, claims };
   });
 
-  const kwSets = members.map((m) => new Set(extractKeywordsLite(m.title, m.body, 16)));
+  const kwSets = members.map((m) => new Set(extractKeywords(m.title, m.body, 16)));
   const kwCount = new Map<string, number>();
-  kwSets.forEach((set) => set.forEach((k) => kwCount.set(k, (kwCount.get(k) || 0) + 1)));
+  kwSets.forEach((set) => set.forEach((k) => {
+    if (k.length < 2 || isGenericClusterToken(k)) return;
+    kwCount.set(k, (kwCount.get(k) || 0) + 1);
+  }));
   const shared = [...kwCount.entries()]
     .filter(([, c]) => c >= Math.max(2, Math.ceil(members.length / 2)))
     .map(([k]) => k);
@@ -291,9 +395,18 @@ export function buildEventArcSkeleton(eventTitle: string, members: EventMemberIn
   const consensus: string[] = [];
   for (const { m } of analyzed) {
     for (const sent of sentencesOf(m.body).slice(0, 20)) {
+      if (!isQualityClaim(sent)) continue;
       const hits = shared.filter((k) => sent.toLowerCase().includes(k)).length;
-      if (hits >= 2 && consensus.length < 6 && !consensus.some((c) => c.slice(0, 16) === sent.slice(0, 16))) {
+      if (hits >= 2 && consensus.length < 6 && !consensus.some((c) => sentenceFingerprint(c) === sentenceFingerprint(sent))) {
         consensus.push(sent.replace(/[。]$/, "").slice(0, 120));
+      }
+    }
+  }
+  if (!consensus.length) {
+    for (const { claims } of analyzed) {
+      for (const c of claims.slice(0, 2)) {
+        if (consensus.length >= 4) break;
+        if (!consensus.some((x) => sentenceFingerprint(x) === sentenceFingerprint(c))) consensus.push(c);
       }
     }
   }
@@ -318,6 +431,7 @@ export function buildEventArcSkeleton(eventTitle: string, members: EventMemberIn
   const actorMap = new Map<string, ActorAttitude>();
   for (const { a } of analyzed) {
     for (const act of a.actors) {
+      if (!isPlausibleActorName(act.actor)) continue;
       const prev = actorMap.get(act.actor);
       if (!prev || Math.abs(act.score) > Math.abs(prev.score)) actorMap.set(act.actor, act);
     }
@@ -335,7 +449,8 @@ export function buildEventArcSkeleton(eventTitle: string, members: EventMemberIn
   }).slice(0, 40);
 
   const feeds = new Set(members.map((m) => m.feedId));
-  const sources = analyzed.map(({ m, a }) => ({
+  const allClaims = analyzed.map((x) => x.claims);
+  const sources = analyzed.map(({ m, a, claims }, idx) => ({
     articleId: m.id,
     feedId: m.feedId,
     feedTitle: m.feedTitle,
@@ -346,26 +461,60 @@ export function buildEventArcSkeleton(eventTitle: string, members: EventMemberIn
     stanceScore: a.valence,
     stanceLabel: a.label,
     attitude: { valence: a.valence, objectivity: a.objectivity, label: a.label },
-    narrative: a.label === "客观" ? "偏事实陈述" : a.label === "主观" ? "偏评价叙述" : `态度${a.label}`,
-    tone: a.label,
-    keyPoints: extractKeywordsLite(m.title, m.body, 5),
-    uniqueInfo: [...kwSets[analyzed.findIndex((x) => x.m.id === m.id)] || []]
-      .filter((k) => (kwCount.get(k) || 0) === 1)
-      .slice(0, 4)
-      .map((k) => `独有关注：「${k}」`),
+    narrative: describeNarrative(a.label, a.objectivity, a.framingWords),
+    tone: describeTone(a.label, a.objectivity),
+    keyPoints: claims,
+    uniqueInfo: exclusiveClaims(claims, allClaims.filter((_, j) => j !== idx), 4),
     framingWords: a.framingWords,
-    actorMentions: a.actors,
+    actorMentions: a.actors.filter((x) => isPlausibleActorName(x.actor)),
   }));
 
+  const actors = [...actorMap.values()];
   return {
-    overallSummary: `事件「${eventTitle}」共 ${members.length} 篇报道、${feeds.size} 个来源。本地已从整篇正文归纳态度与时间线骨架。`,
+    overallSummary: actors.length
+      ? `事件「${eventTitle}」共 ${members.length} 篇报道、${feeds.size} 个来源；已识别 ${actors.length} 个国家/机构立场线索。`
+      : `事件「${eventTitle}」共 ${members.length} 篇报道、${feeds.size} 个来源。本稿未识别到明确的国家/机构立场，以下以来源叙述拆解为主。`,
     consensus,
     divergences,
     timeline: timelineDedup,
-    countryOrActorAttitudes: [...actorMap.values()],
+    countryOrActorAttitudes: actors,
     sources,
     generatedBy: "heuristic",
   };
+}
+
+/** Post-validate heuristic or LLM comparison fields — drop garbage, keep package. */
+export function sanitizeComparisonFields<T extends {
+  countryOrActorAttitudes?: ActorAttitude[];
+  sources?: {
+    keyPoints?: string[];
+    uniqueInfo?: string[];
+    actorMentions?: ActorAttitude[];
+    narrative?: string;
+    tone?: string;
+  }[];
+  consensus?: string[];
+}>(comp: T): T {
+  const actors = (comp.countryOrActorAttitudes || [])
+    .filter((a) => a && isPlausibleActorName(String(a.actor || "")))
+    .map((a) => ({
+      ...a,
+      actor: String(a.actor).trim(),
+      summary: a.summary && isQualityClaim(a.summary) ? a.summary : a.summary,
+      evidenceSpan: a.evidenceSpan && String(a.evidenceSpan).length >= 8 ? a.evidenceSpan : undefined,
+    }));
+  const sources = (comp.sources || []).map((s) => ({
+    ...s,
+    keyPoints: (s.keyPoints || []).map(String).filter(isQualityClaim).slice(0, 6),
+    uniqueInfo: (s.uniqueInfo || [])
+      .map(String)
+      .filter((u) => isQualityClaim(u) || (u.length >= 12 && !/^独有关注：[「『].{1,6}[」』]$/.test(u)))
+      .filter((u) => !/^独有关注：[「『].{1,4}[」』]$/.test(u))
+      .slice(0, 5),
+    actorMentions: (s.actorMentions || []).filter((a) => isPlausibleActorName(String(a.actor || ""))),
+  }));
+  const consensus = (comp.consensus || []).map(String).filter(isQualityClaim).slice(0, 8);
+  return { ...comp, countryOrActorAttitudes: actors, sources, consensus };
 }
 
 /** Articles for deep compare: all members, but same-feed pairs are not contrast targets — keep all cross-feed articles (every article whose feed appears with another feed). */

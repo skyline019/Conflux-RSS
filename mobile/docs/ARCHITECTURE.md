@@ -76,7 +76,7 @@
 
 ## Schema 版本
 
-当前 `SCHEMA_VERSION = 5`（见 `mobile/src/db.ts`）。
+当前 `SCHEMA_VERSION = 6`（见 `mobile/src/db.ts`；v6 含一次性 `cluster_heal_v1` rebuild 标记）。
 
 - v2：媒体与 `ai_json` 等列  
 - v3：`scroll_offset` 阅读进度  

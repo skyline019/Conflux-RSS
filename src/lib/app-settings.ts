@@ -46,7 +46,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   rsshubBase: "https://rsshub.rssforever.com",
   dedupTitleThreshold: 0.78,
   dedupSimhashDistance: 5,
-  clusterThreshold: 0.27,
+  clusterThreshold: 0.34,
   clusterWindowHours: 96,
   proxyEnabled: true,
   proxyUrl: "",

@@ -1,23 +1,28 @@
 import { db } from "@/db";
 import { articles, clusters } from "@/db/schema";
 import { eq, desc, sql, inArray, and, ne } from "drizzle-orm";
-import { extractKeywords, extractEntities, stanceHeuristic } from "./textCore";
+import { extractKeywords, stanceHeuristic } from "./textCore";
 import { getSettings } from "./app-settings";
 import {
-  buildCandidatePairs,
   buildSignature,
   decodeSignature,
   encodeSignature,
   signatureOverlap,
-  type BlockDoc,
 } from "./clusterBlocking";
 import {
+  clusterEdgeOk,
   computeIdfWeights,
-  eventSimilarity,
+  linkClustersFromCorpus,
+  selectConsistentClusterMatches,
   type ClusterCand,
 } from "./clusterCore";
 
-export { computeIdfWeights, eventSimilarity } from "./clusterCore";
+export {
+  computeIdfWeights,
+  eventSimilarity,
+  passesEventClusterGate,
+  selectConsistentClusterMatches,
+} from "./clusterCore";
 
 type ClusterCandidate = ClusterCand & { publishedAt: Date | null; clusterId: number | null };
 
@@ -128,20 +133,16 @@ export async function assignToCluster(articleId: number): Promise<number | null>
     if (other.feedId === me.feedId) continue;
     const hours = Math.abs(meTime - new Date(other.publishedAt || other.createdAt).getTime()) / 3600000;
     if (hours > s.clusterWindowHours * 2) continue;
-    const score = eventSimilarity(
-      meC,
-      { ...other, keywords: other.keywords || [], clusterId: other.clusterId },
-      weights,
-      hours,
-      s.clusterWindowHours,
-    );
+    const otherC = { ...other, keywords: other.keywords || [], clusterId: other.clusterId };
+    const { ok, score } = clusterEdgeOk(meC, otherC, s.clusterThreshold, weights, hours, s.clusterWindowHours);
+    if (!ok) continue;
     if (score > bestScore) {
       bestScore = score;
       best = other;
     }
   }
 
-  if (!best || bestScore < s.clusterThreshold) return me.clusterId;
+  if (!best) return me.clusterId;
 
   if (best.clusterId) {
     if (me.clusterId !== best.clusterId) {
@@ -189,79 +190,39 @@ export async function rebuildClusters(
     publishedAt: articles.publishedAt, feedId: articles.feedId, createdAt: articles.createdAt,
   }).from(articles).orderBy(desc(articles.createdAt));
 
-  const weights = computeIdfWeights(all.map((a) => ({ keywords: a.keywords || [] })));
-  const cands = all.map((a, idx) => ({
-    ...a,
-    keywords: a.keywords || [],
-    clusterId: null as number | null,
-    createdAt: a.createdAt || new Date(),
-    idx,
-  }));
-
-  const docs: BlockDoc[] = cands.map((a, idx) => ({
+  const cands: ClusterCand[] = all.map((a) => ({
     id: a.id,
-    idx,
     title: a.title,
-    keywords: a.keywords,
+    keywords: a.keywords || [],
     feedId: a.feedId,
-    timeMs: new Date(a.publishedAt || a.createdAt).getTime(),
-    entities: extractEntities(a.title),
+    publishedAt: a.publishedAt,
+    createdAt: a.createdAt || new Date(),
+    clusterId: null,
   }));
 
-  const windowMs = s.clusterWindowHours * 2 * 3600 * 1000;
-  const pairs = buildCandidatePairs(docs, weights, windowMs);
-
-  const parent = cands.map((_, i) => i);
-  const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
-  const unite = (a: number, b: number) => {
-    const pa = find(a);
-    const pb = find(b);
-    if (pa !== pb) parent[pb] = pa;
-  };
-
-  for (let pi = 0; pi < pairs.length; pi++) {
-    const [i, j] = pairs[pi];
-    const a = cands[i];
-    const b = cands[j];
-    if (a.feedId === b.feedId) continue;
-    const hours = Math.abs(
-      new Date(a.publishedAt || a.createdAt).getTime() - new Date(b.publishedAt || b.createdAt).getTime(),
-    ) / 3600000;
-    const score = eventSimilarity(a, b, weights, hours, s.clusterWindowHours);
-    if (score >= s.clusterThreshold) unite(i, j);
-    if (pi % 200 === 0) onProgress?.({ phase: "link", done: pi, total: Math.max(1, pairs.length) });
-  }
-  onProgress?.({ phase: "link", done: pairs.length, total: Math.max(1, pairs.length) });
-
-  const groups = new Map<number, typeof cands>();
-  cands.forEach((c, i) => {
-    const root = find(i);
-    const arr = groups.get(root) || [];
-    arr.push(c);
-    groups.set(root, arr);
-  });
+  const linked = linkClustersFromCorpus(
+    cands,
+    { clusterThreshold: s.clusterThreshold, clusterWindowHours: s.clusterWindowHours },
+    onProgress,
+  );
 
   let created = 0;
   let assigned = 0;
-  const buckets = [...groups.values()];
-  for (let bi = 0; bi < buckets.length; bi++) {
-    const members = buckets[bi];
-    if (members.length < 2) continue;
-    const distinctFeeds = new Set(members.map((m) => m.feedId)).size;
-    if (distinctFeeds < 2) continue; // hard: multi-source only
+  for (let bi = 0; bi < linked.length; bi++) {
+    const g = linked[bi];
     const [c] = await db.insert(clusters).values({
-      title: members[0].title,
-      keywords: members[0].keywords,
+      title: g.title,
+      keywords: g.keywords,
     }).returning({ id: clusters.id });
     created++;
-    for (const m of members) {
-      await db.update(articles).set({ clusterId: c.id }).where(eq(articles.id, m.id));
+    for (const id of g.memberIds) {
+      await db.update(articles).set({ clusterId: c.id }).where(eq(articles.id, id));
       assigned++;
     }
     await refreshClusterStats(c.id);
-    if (bi % 10 === 0) onProgress?.({ phase: "write", done: bi, total: buckets.length });
+    if (bi % 10 === 0) onProgress?.({ phase: "write", done: bi, total: linked.length });
   }
-  onProgress?.({ phase: "write", done: buckets.length, total: buckets.length });
+  onProgress?.({ phase: "write", done: linked.length, total: linked.length });
   return { clusters: created, assigned };
 }
 
@@ -286,42 +247,43 @@ export async function analyzeArticleCluster(articleId: number): Promise<{
   };
   const weights = computeIdfWeights(recent.map((r) => ({ keywords: r.keywords || [] })));
   const meTime = new Date(me.publishedAt || me.createdAt).getTime();
-  const hits: { row: typeof recent[number]; score: number }[] = [];
+  const hits: { row: typeof recent[number]; score: number; cand: ClusterCand }[] = [];
   for (const other of recent) {
     if (other.id === me.id || other.feedId === me.feedId) continue;
     const hours = Math.abs(meTime - new Date(other.publishedAt || other.createdAt).getTime()) / 3600000;
     if (hours > s.clusterWindowHours * 2) continue;
-    const score = eventSimilarity(
-      meC,
-      { ...other, keywords: other.keywords || [] },
-      weights,
-      hours,
-      s.clusterWindowHours,
-    );
-    if (score >= s.clusterThreshold) hits.push({ row: other, score });
+    const cand: ClusterCand = { ...other, keywords: other.keywords || [] };
+    const { ok, score } = clusterEdgeOk(meC, cand, s.clusterThreshold, weights, hours, s.clusterWindowHours);
+    if (ok) hits.push({ row: other, score, cand });
   }
-  hits.sort((a, b) => b.score - a.score);
-  const top = hits.slice(0, 12);
+  const top = selectConsistentClusterMatches(meC, hits, s.clusterThreshold, weights, s.clusterWindowHours);
   const matches = top.map((h) => ({
     id: h.row.id, title: h.row.title, feedId: h.row.feedId,
     score: Math.round(h.score * 1000) / 1000,
   }));
   if (!top.length) return { clusterId: me.clusterId, matches };
 
-  const host = top.find((h) => h.row.clusterId)?.row.clusterId || null;
-  if (host) {
-    const ids = [me.id, ...top.filter((h) => !h.row.clusterId).map((h) => h.row.id)];
+  const best = top[0];
+  const attachIds = [me.id, ...top.map((h) => h.row.id)];
+
+  if (best.row.clusterId) {
+    const host = best.row.clusterId;
+    // Only attach me + consistent matches that are unclustered or already on host
+    const ids = attachIds.filter((id) => {
+      if (id === me.id) return true;
+      const hit = top.find((h) => h.row.id === id);
+      return hit && (!hit.row.clusterId || hit.row.clusterId === host);
+    });
     await db.update(articles).set({ clusterId: host }).where(inArray(articles.id, ids));
     await refreshClusterStats(host);
     return { clusterId: host, matches };
   }
 
   const [created] = await db.insert(clusters).values({
-    title: me.title.length <= top[0].row.title.length ? me.title : top[0].row.title,
+    title: me.title.length <= best.row.title.length ? me.title : best.row.title,
     keywords: me.keywords || [],
   }).returning({ id: clusters.id });
-  const ids = [me.id, ...top.map((h) => h.row.id)];
-  await db.update(articles).set({ clusterId: created.id }).where(inArray(articles.id, ids));
+  await db.update(articles).set({ clusterId: created.id }).where(inArray(articles.id, attachIds));
   await refreshClusterStats(created.id);
   return { clusterId: created.id, matches };
 }

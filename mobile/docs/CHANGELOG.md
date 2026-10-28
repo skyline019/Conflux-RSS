@@ -1,5 +1,14 @@
 # Changelog（手机端）
 
+## 0.2.8
+
+- **聚类质量**：`passesEventClusterGate`（标题下限 / 非通用实体）+ 默认阈值 0.34；analyze 仅最佳匹配+互证，禁止 top-12 星形并簇；InfoQ×Trending 类假事件被门禁拒绝  
+- **手机 ingest**：插入即写 keywords/stance；全文成功后回填并再 assign；SCHEMA v6 一次性 `cluster_heal` rebuild 清脏簇  
+- **事件对比 Layer0**：禁用 FTS `searchTokenize` 作论点；句级 `keyPoints`/`uniqueInfo`；行为体形状过滤（宁缺毋滥）；`sanitizeComparisonFields` 后验清洗  
+- **LLM 对比路径**：filler 改用句级抽取（修未导入 `extractKeywords` 整段回退）；先验只传态度标量；空行为体不硬套地缘  
+- **EventsView**：无合格行为体时说明降级；过滤过短/伪「独有关注」碎片  
+- **阅读「…」菜单**：`createPortal` 视口级底部 sheet（`z-[70]`），脱离 blur containing-block；合集同为底部 sheet；去掉双重 safe-area-top  
+
 ## 0.2.7
 
 - **阅读顶栏**：图标返回、暗色工具栏、安全区、底部「更多」sheet（能力不删减）  

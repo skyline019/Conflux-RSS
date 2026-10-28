@@ -4,6 +4,7 @@
 import {
   buildEventArcSkeleton,
   eventCompareCacheKey,
+  sanitizeComparisonFields,
   selectCrossFeedArticlesForCompare,
   type ActorAttitude,
   type AttitudeLabel,
@@ -11,7 +12,7 @@ import {
   type EventMemberInput,
 } from "./stanceTimeline";
 
-export { eventCompareCacheKey, selectCrossFeedArticlesForCompare };
+export { eventCompareCacheKey, selectCrossFeedArticlesForCompare, sanitizeComparisonFields };
 
 export type SourceView = {
   articleId: number;
@@ -174,7 +175,7 @@ export function mergeArcPartials(
     return true;
   }).sort((a, b) => a.time.localeCompare(b.time));
 
-  return {
+  return sanitizeComparisonFields({
     ...base,
     overallSummary: parts.find((p) => p.overallSummary)?.overallSummary || base.overallSummary,
     consensus: consensus.slice(0, 12),
@@ -183,7 +184,7 @@ export function mergeArcPartials(
     countryOrActorAttitudes: actors.slice(0, 20),
     sources: [...byArticle.values()],
     generatedBy: parts.some((p) => p.generatedBy === "llm") ? "llm" : base.generatedBy,
-  };
+  });
 }
 
 export function buildLayer0ForEvent(
@@ -199,5 +200,5 @@ export function buildLayer0ForEvent(
 ): ComparisonResult {
   const members = toEventMembers(items);
   const sk = buildEventArcSkeleton(eventTitle, members);
-  return skeletonToComparison(sk);
+  return sanitizeComparisonFields(skeletonToComparison(sk));
 }

@@ -2,9 +2,10 @@
  * Mobile clustering adapter: shared clusterCore + clusterBlocking over sql.js.
  */
 import {
+  clusterEdgeOk,
   computeIdfWeights,
-  eventSimilarity,
   linkClustersFromCorpus,
+  selectConsistentClusterMatches,
   type ClusterCand,
 } from "@/lib/clusterCore";
 import {
@@ -41,7 +42,7 @@ function clusterSettings() {
     raw = row?.value ? JSON.parse(String(row.value)) : {};
   } catch { /* */ }
   return {
-    clusterThreshold: Number(raw.clusterThreshold) || 0.27,
+    clusterThreshold: Number(raw.clusterThreshold) || 0.34,
     clusterWindowHours: Number(raw.clusterWindowHours) || 96,
   };
 }
@@ -194,30 +195,37 @@ export function analyzeArticleClusterMobile(articleId: number): {
      from articles order by seen desc limit 2000`,
   );
   const weights = computeIdfWeights(recent.map((r) => ({ keywords: parseJsonList(r.keywords) })));
-  const hits: { row: Row; score: number }[] = [];
+  const hits: { row: Row; score: number; cand: ClusterCand }[] = [];
   for (const other of recent) {
     if (Number(other.id) === articleId || Number(other.feedId) === meC.feedId) continue;
     const otherTime = other.seen ? Date.parse(String(other.seen)) || 0 : 0;
     const hours = Math.abs(meTime - otherTime) / 3600000;
     if (hours > settings.clusterWindowHours * 2) continue;
-    const score = eventSimilarity(
+    const cand: ClusterCand = {
+      id: Number(other.id),
+      title: String(other.title),
+      keywords: parseJsonList(other.keywords),
+      feedId: Number(other.feedId),
+      publishedAt: other.seen ? String(other.seen) : null,
+      clusterId: other.clusterId == null ? null : Number(other.clusterId),
+    };
+    const { ok, score } = clusterEdgeOk(
       meC,
-      {
-        id: Number(other.id),
-        title: String(other.title),
-        keywords: parseJsonList(other.keywords),
-        feedId: Number(other.feedId),
-        publishedAt: other.seen ? String(other.seen) : null,
-        clusterId: other.clusterId == null ? null : Number(other.clusterId),
-      },
+      cand,
+      settings.clusterThreshold,
       weights,
       hours,
       settings.clusterWindowHours,
     );
-    if (score >= settings.clusterThreshold) hits.push({ row: other, score });
+    if (ok) hits.push({ row: other, score, cand });
   }
-  hits.sort((a, b) => b.score - a.score);
-  const top = hits.slice(0, 12);
+  const top = selectConsistentClusterMatches(
+    meC,
+    hits,
+    settings.clusterThreshold,
+    weights,
+    settings.clusterWindowHours,
+  );
   const matches = top.map((h) => ({
     id: Number(h.row.id),
     title: String(h.row.title),
@@ -228,21 +236,23 @@ export function analyzeArticleClusterMobile(articleId: number): {
     return { clusterId: me.clusterId == null ? null : Number(me.clusterId), matches };
   }
 
-  const host = top.find((h) => h.row.clusterId != null)?.row.clusterId;
-  if (host != null) {
-    const hostId = Number(host);
+  const best = top[0];
+  if (best.row.clusterId != null) {
+    const hostId = Number(best.row.clusterId);
     run("update articles set cluster_id = ? where id = ?", [hostId, articleId]);
-    for (const h of top.filter((item) => item.row.clusterId == null)) {
-      run("update articles set cluster_id = ? where id = ?", [hostId, Number(h.row.id)]);
+    for (const h of top) {
+      if (h.row.clusterId == null || Number(h.row.clusterId) === hostId) {
+        run("update articles set cluster_id = ? where id = ?", [hostId, Number(h.row.id)]);
+      }
     }
     refreshClusterStatsMobile(hostId);
     return { clusterId: hostId, matches };
   }
 
   const title =
-    String(me.title).length <= String(top[0].row.title).length
+    String(me.title).length <= String(best.row.title).length
       ? String(me.title)
-      : String(top[0].row.title);
+      : String(best.row.title);
   const clusterId = run(
     "insert into clusters(title, keywords, created_at) values(?, ?, ?)",
     [title, JSON.stringify(meC.keywords), nowIso()],
@@ -321,27 +331,30 @@ export function assignToClusterMobile(articleId: number): number | null {
     const otherTime = other.seen ? Date.parse(String(other.seen)) || 0 : 0;
     const hours = Math.abs(meTime - otherTime) / 3600000;
     if (hours > settings.clusterWindowHours * 2) continue;
-    const score = eventSimilarity(
+    const cand: ClusterCand = {
+      id: Number(other.id),
+      title: String(other.title),
+      keywords: parseJsonList(other.keywords),
+      feedId: Number(other.feedId),
+      publishedAt: other.seen ? String(other.seen) : null,
+      clusterId: other.clusterId == null ? null : Number(other.clusterId),
+    };
+    const { ok, score } = clusterEdgeOk(
       meC,
-      {
-        id: Number(other.id),
-        title: String(other.title),
-        keywords: parseJsonList(other.keywords),
-        feedId: Number(other.feedId),
-        publishedAt: other.seen ? String(other.seen) : null,
-        clusterId: other.clusterId == null ? null : Number(other.clusterId),
-      },
+      cand,
+      settings.clusterThreshold,
       weights,
       hours,
       settings.clusterWindowHours,
     );
+    if (!ok) continue;
     if (score > bestScore) {
       bestScore = score;
       best = other;
     }
   }
 
-  if (!best || bestScore < settings.clusterThreshold) {
+  if (!best) {
     return me.clusterId == null ? null : Number(me.clusterId);
   }
 

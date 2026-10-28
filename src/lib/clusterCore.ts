@@ -14,10 +14,35 @@ export type ClusterCand = {
   clusterId?: number | null;
 };
 
+/** Generic tech / conference tokens that must not alone glue unrelated stories. */
+export const GENERIC_CLUSTER_TOKENS = new Set(
+  [
+    "api", "llm", "gpt", "ai", "agent", "agents", "openai", "github", "open", "source",
+    "trending", "repo", "code", "data", "system", "model", "models", "tech", "framework",
+    "开源", "大会", "系统", "技术", "数据", "业务", "工程", "模型", "智能", "生产", "交付",
+    "挑战", "解读", "圆满", "收官", "全球", "软件", "开发", "任务",
+  ].map((x) => x.toLowerCase()),
+);
+
+export function isGenericClusterToken(token: string): boolean {
+  const t = (token || "").toLowerCase().trim();
+  if (!t) return true;
+  if (GENERIC_CLUSTER_TOKENS.has(t)) return true;
+  if (/^\d{2,4}$/.test(t)) return true;
+  return false;
+}
+
+export function nonGenericEntities(title: string): string[] {
+  return extractEntities(title).filter((e) => !isGenericClusterToken(e));
+}
+
 export function computeIdfWeights(docs: { keywords: string[] }[]): Map<string, number> {
   const df = new Map<string, number>();
   for (const d of docs) {
-    for (const k of new Set((d.keywords || []).map((x) => x.toLowerCase()))) df.set(k, (df.get(k) || 0) + 1);
+    for (const k of new Set((d.keywords || []).map((x) => x.toLowerCase()))) {
+      if (isGenericClusterToken(k)) continue;
+      df.set(k, (df.get(k) || 0) + 1);
+    }
   }
   const weights = new Map<string, number>();
   const n = Math.max(1, docs.length);
@@ -27,12 +52,17 @@ export function computeIdfWeights(docs: { keywords: string[] }[]): Map<string, n
 
 function keywordOverlapWeighted(a: string[], b: string[], weights?: Map<string, number>): number {
   if (!a.length || !b.length) return 0;
+  const filt = (xs: string[]) =>
+    [...new Set(xs.map((v) => v.toLowerCase()).filter((k) => !isGenericClusterToken(k)))];
+  const aa = filt(a);
+  const bb = filt(b);
+  if (!aa.length || !bb.length) return 0;
   const w = (k: string) => weights?.get(k.toLowerCase()) ?? 1;
-  const sb = new Set(b.map((x) => x.toLowerCase()));
+  const sb = new Set(bb);
   let shared = 0;
-  for (const x of new Set(a.map((v) => v.toLowerCase()))) if (sb.has(x)) shared += w(x);
-  const sumA = [...new Set(a.map((v) => v.toLowerCase()))].reduce((s, x) => s + w(x), 0);
-  const sumB = [...sb].reduce((s, x) => s + w(x), 0);
+  for (const x of aa) if (sb.has(x)) shared += w(x);
+  const sumA = aa.reduce((s, x) => s + w(x), 0);
+  const sumB = bb.reduce((s, x) => s + w(x), 0);
   const denom = Math.min(sumA, sumB);
   return denom > 0 ? shared / denom : 0;
 }
@@ -59,8 +89,8 @@ export function eventSimilarity(
   const ts = titleSimilarity(a.title, b.title);
   const ko = keywordOverlapWeighted(a.keywords, b.keywords, weights);
   let score = ts * 0.45 + ko * 0.4;
-  const ea = extractEntities(a.title);
-  const eb = new Set(extractEntities(b.title));
+  const ea = nonGenericEntities(a.title);
+  const eb = new Set(nonGenericEntities(b.title));
   const sharedEntities = ea.filter((e) => eb.has(e));
   if (sharedEntities.length) score += Math.min(0.22, 0.1 + sharedEntities.length * 0.06);
   if (ts >= 0.55 && ko >= 0.2) score += 0.06;
@@ -69,6 +99,39 @@ export function eventSimilarity(
     score *= 0.7 + 0.3 * decay;
   }
   return Math.min(1, score);
+}
+
+/**
+ * Hard quality gate beyond raw score: require meaningful title overlap
+ * or a non-generic shared entity with a weaker title floor.
+ */
+export function passesEventClusterGate(
+  a: ClusterCand,
+  b: ClusterCand,
+  score: number,
+  threshold: number,
+): boolean {
+  if (!(score >= threshold)) return false;
+  if (a.feedId === b.feedId) return false;
+  const ts = titleSimilarity(a.title, b.title);
+  if (ts >= 0.18) return true;
+  const ea = new Set(nonGenericEntities(a.title));
+  const shared = nonGenericEntities(b.title).filter((e) => ea.has(e));
+  if (shared.length >= 1 && ts >= 0.1) return true;
+  return false;
+}
+
+/** Score + gate in one call for assign/analyze/rebuild loops. */
+export function clusterEdgeOk(
+  a: ClusterCand,
+  b: ClusterCand,
+  threshold: number,
+  weights?: Map<string, number>,
+  hoursApart?: number,
+  windowHours = 96,
+): { ok: boolean; score: number } {
+  const score = eventSimilarity(a, b, weights, hoursApart, windowHours);
+  return { ok: passesEventClusterGate(a, b, score, threshold), score };
 }
 
 export type RebuildSettings = {
@@ -99,7 +162,7 @@ export function linkClustersFromCorpus(
     keywords: a.keywords || [],
     feedId: a.feedId,
     timeMs: timeMsOf(a),
-    entities: extractEntities(a.title),
+    entities: nonGenericEntities(a.title),
   }));
 
   const windowMs = settings.clusterWindowHours * 2 * 3600 * 1000;
@@ -119,8 +182,8 @@ export function linkClustersFromCorpus(
     const b = cands[j];
     if (a.feedId === b.feedId) continue;
     const hours = Math.abs(timeMsOf(a) - timeMsOf(b)) / 3600000;
-    const score = eventSimilarity(a, b, weights, hours, settings.clusterWindowHours);
-    if (score >= settings.clusterThreshold) unite(i, j);
+    const { ok } = clusterEdgeOk(a, b, settings.clusterThreshold, weights, hours, settings.clusterWindowHours);
+    if (ok) unite(i, j);
     if (pi % 200 === 0) onProgress?.({ phase: "link", done: pi, total: Math.max(1, pairs.length) });
   }
   onProgress?.({ phase: "link", done: pairs.length, total: Math.max(1, pairs.length) });
@@ -143,6 +206,35 @@ export function linkClustersFromCorpus(
       title: members[0].title,
       keywords: members[0].keywords || [],
     });
+  }
+  return out;
+}
+
+/**
+ * From scored hits against `me`, keep best + optional second only if it also
+ * passes the gate with the best (pairwise consistency). Never star-merge top-N.
+ */
+export function selectConsistentClusterMatches<T extends { score: number; cand: ClusterCand }>(
+  me: ClusterCand,
+  hits: T[],
+  threshold: number,
+  weights?: Map<string, number>,
+  windowHours = 96,
+): T[] {
+  const gated = hits
+    .filter((h) => passesEventClusterGate(me, h.cand, h.score, threshold))
+    .sort((a, b) => b.score - a.score);
+  if (!gated.length) return [];
+  const best = gated[0];
+  const out: T[] = [best];
+  for (let i = 1; i < gated.length && out.length < 2; i++) {
+    const h = gated[i];
+    const hours =
+      timeMsOf(best.cand) && timeMsOf(h.cand)
+        ? Math.abs(timeMsOf(best.cand) - timeMsOf(h.cand)) / 3600000
+        : undefined;
+    const { ok } = clusterEdgeOk(best.cand, h.cand, threshold, weights, hours, windowHours);
+    if (ok) out.push(h);
   }
   return out;
 }

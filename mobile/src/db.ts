@@ -1,7 +1,7 @@
 import initSqlJs, { type Database } from "fts5-sql-bundle";
 import wasmUrl from "fts5-sql-bundle/dist/sql-wasm.wasm?url";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const SCHEMA = `
 create table if not exists settings (key text primary key, value text not null);
@@ -221,11 +221,30 @@ function migrate(): boolean {
     setSchemaVersion(5);
     changed = true;
   }
+  // v5→v6: flag one-shot cluster rebuild after quality-gate upgrade
+  if (ver < 6) {
+    run(
+      "insert into settings(key, value) values('cluster_heal_v1', 'pending') on conflict(key) do update set value = excluded.value",
+    );
+    ver = 6;
+    setSchemaVersion(6);
+    changed = true;
+  }
   if (ver < SCHEMA_VERSION) {
     setSchemaVersion(SCHEMA_VERSION);
     changed = true;
   }
   return changed;
+}
+
+/** True when a one-shot cluster heal rebuild is pending after schema upgrade. */
+export function clusterHealPending(): boolean {
+  const row = get<{ value: string }>("select value from settings where key = 'cluster_heal_v1'");
+  return String(row?.value || "") === "pending";
+}
+
+export function clearClusterHealFlag() {
+  run("insert into settings(key, value) values('cluster_heal_v1', 'done') on conflict(key) do update set value = 'done'");
 }
 
 /** Cached probe: null=unknown, true=FTS5 ok, false=wasm/module lacks FTS5. */

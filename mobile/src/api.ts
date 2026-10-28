@@ -1,6 +1,7 @@
 import { CATALOG, CATALOG_REV } from "../../desktop/catalog.mjs";
 import {
-  all, articlesFtsAvailable, beginBulkWrite, clearArticlesFts, deleteArticleFtsRow, deleteArticlesFtsForFeed, endBulkWrite, ensureArticlesFts,
+  all, articlesFtsAvailable, beginBulkWrite, clearArticlesFts, clearClusterHealFlag, clusterHealPending,
+  deleteArticleFtsRow, deleteArticlesFtsForFeed, endBulkWrite, ensureArticlesFts,
   exec, exportDbBytes, get, getSchemaVersion, openDatabase, replaceDatabase, run, saveNow, upsertArticleFtsRow, type Row,
 } from "./db";
 import { netConditional, netFetch, netText, setRawFetch } from "./net";
@@ -16,6 +17,7 @@ import {
 import {
   buildLayer0ForEvent,
   mergeArcPartials,
+  sanitizeComparisonFields,
   selectCrossFeedArticlesForCompare,
   type ComparisonResult,
 } from "@/lib/compareArc";
@@ -35,6 +37,7 @@ import {
   assignToClusterMobile,
   rebuildClustersMobile,
 } from "./clusterMobile";
+import { extractKeywords, stanceHeuristic } from "@/lib/textCore";
 import packageJson from "../package.json";
 
 const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.7");
@@ -45,7 +48,7 @@ const DEFAULTS = {
   llmEnabled: false, llmProvider: "deepseek", llmBaseUrl: "https://api.deepseek.com/v1", llmApiKey: "", llmModel: "deepseek-chat",
   autoFullText: true, fullTextPerFeedLimit: 3, autoSummary: false,
   crawlTimeoutMs: 16000, crawlMaxPages: 3, crawlConcurrency: 3, feedRefreshConcurrency: 8,
-  dedupTitleThreshold: 0.78, dedupSimhashDistance: 5, clusterThreshold: 0.27, clusterWindowHours: 96,
+  dedupTitleThreshold: 0.78, dedupSimhashDistance: 5, clusterThreshold: 0.34, clusterWindowHours: 96,
   proxyEnabled: false, proxyUrl: "",
 };
 
@@ -752,7 +755,15 @@ async function storeFullText(id: number) {
         extracted.sourceUrl, extracted.videoUrl || "", JSON.stringify(extracted.images || []), JSON.stringify(extracted.media || []), id,
       ],
     );
+    const kws = extractKeywords(String(article.title || ""), extracted.text, 10);
+    const stance = stanceHeuristic(`${article.title}。${extracted.text}`).score;
+    run("update articles set keywords = ?, stance_score = ? where id = ?", [
+      JSON.stringify(kws),
+      stance,
+      id,
+    ]);
     refreshArticleFts(id);
+    try { assignToClusterMobile(id); } catch { /* re-assign best-effort */ }
     return { ok: true, wordCount: extracted.wordCount };
   } catch {
     run("update articles set full_text_status = 'failed', fulltext_tries = fulltext_tries + 1 where id = ? and full_text_status != 'success'", [id]);
@@ -819,10 +830,12 @@ async function refreshFeed(feed: Row) {
     if (matched?.action === "block") { filtered += 1; run("update rules set hit_count = hit_count + 1, last_hit_at = ? where id = ?", [nowIso(), Number(matched.id)]); continue; }
     const body = packed.content.slice(0, 20000);
     const status = item.html && body.length > 600 ? "rss" : "pending";
-    const inserted = run(`insert into articles(feed_id, title, link, author, rss_summary, content, content_html, full_text_status, image_url, word_count, published_at, fetched_at, created_at, is_read, is_starred, is_archived)
-      values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict(feed_id, link) do nothing`, [
+    const kws = extractKeywords(item.title, `${item.summary || ""} ${body}`, 10);
+    const stance = stanceHeuristic(`${item.title}。${body || item.summary || ""}`).score;
+    const inserted = run(`insert into articles(feed_id, title, link, author, rss_summary, content, content_html, full_text_status, image_url, word_count, keywords, stance_score, published_at, fetched_at, created_at, is_read, is_starred, is_archived)
+      values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict(feed_id, link) do nothing`, [
       Number(feed.id), item.title, item.link, item.author || null, item.summary, body, item.html ? item.html.slice(0, 120000) : null,
-      status, item.imageUrl, countWords(packed.content), item.publishedAt, nowIso(), nowIso(),
+      status, item.imageUrl, countWords(packed.content), JSON.stringify(kws), stance, item.publishedAt, nowIso(), nowIso(),
       matched?.action === "mark_read" ? 1 : 0, matched?.action === "star" ? 1 : 0, matched?.action === "archive" ? 1 : 0,
     ]);
     if (inserted.changes > 0) {
@@ -1065,8 +1078,8 @@ async function compareCluster(id: number, forceHeuristic: boolean) {
           `【来源${index + 1}】媒体：${item.feedTitle}｜文章ID：${item.id}｜时间：${item.publishedAt || "未知"}\n标题：${item.title}\n正文：\n${strip(item.body)}`,
         ).join("\n\n---\n\n");
         const parsed = parseJsonLoose(await chat([
-          { role: "system", content: "你是资深媒体与地缘政治分析师。基于同一事件完整正文做多源对比，形成详实态度与时间线脉络。态度只用：中立/客观/主观/积极/消极。对国家/行为体必须写清 summary 与 rationale（为什么是该态度），并给出 drivers 与 evidenceQuotes。允许在标明 supplementNote 的前提下补全背景因果，禁止捏造正文未出现的具体数字/日期/引语。只输出 JSON。" },
-          { role: "user", content: `事件：${cluster.title}\n先验：${prior}\n\n输出 JSON：${ARC_JSON_SHAPE}\n\n${docs}` },
+          { role: "system", content: "你是资深媒体分析师。基于同一事件完整正文做多源对比。态度只用：中立/客观/主观/积极/消极。keyPoints/uniqueInfo 必须是完整论断句（≥12字），禁止单词或单字。countryOrActorAttitudes 仅填国家/机构/具名人物；技术稿无此类主体则返回空数组，禁止仓库名/会议名/年份当行为体。对确有行为体的条目写清 summary 与 rationale。禁止捏造正文未出现的具体数字/日期/引语。只输出 JSON。" },
+          { role: "user", content: `事件：${cluster.title}\n先验（态度标量，勿照抄垃圾字段）：${prior}\n\n输出 JSON：${ARC_JSON_SHAPE}\n\n${docs}` },
         ], 4500, 0.2, current)) as Partial<ComparisonResult>;
         if (parsed && typeof parsed === "object") {
           // Ensure batch sources reference known article ids when model returns them
@@ -1111,6 +1124,7 @@ async function compareCluster(id: number, forceHeuristic: boolean) {
       }
     } catch { /* keep Layer0 */ }
   }
+  comparison = sanitizeComparisonFields(comparison);
   run("update clusters set comparison = ?, comparison_source = ?, compared_at = ? where id = ?", [JSON.stringify(comparison), comparison.generatedBy, nowIso(), id]);
   for (const source of comparison.sources) run("update articles set stance_score = ? where id = ?", [Number(source.stanceScore) || 0, Number(source.articleId)]);
   return { status: 200, body: { ok: true, comparison, llmReady: llmReady(current) } };
@@ -1701,6 +1715,15 @@ export async function installLocalApi(rawFetch: typeof window.fetch) {
     scheduleIdleFtsRebuild();
   } catch {
     /* FTS optional on first boot */
+  }
+  if (clusterHealPending()) {
+    try {
+      rebuildClustersMobile();
+      clearClusterHealFlag();
+      await saveNow();
+    } catch {
+      /* heal is best-effort; flag stays pending for next boot */
+    }
   }
   const seededRev = get<{ value: string }>("select value from settings where key = 'catalogRev'")?.value || "";
   if (!get("select value from settings where key = 'catalogSeeded'") || seededRev !== CATALOG_REV) {

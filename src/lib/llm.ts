@@ -5,8 +5,9 @@ import {
   buildLayer0ForEvent,
   eventCompareCacheKey,
   mergeArcPartials,
+  sanitizeComparisonFields,
 } from "./compareArc";
-import { analyzeArticleAttitude } from "./stanceTimeline";
+import { analyzeArticleAttitude, extractClaimPoints } from "./stanceTimeline";
 import { searchNewsCandidateUrlsDetailed } from "./fulltext";
 import {
   parseJsonLoose,
@@ -206,11 +207,11 @@ async function llmCompareBatch(
     {
       role: "system",
       content:
-        "你是资深媒体与地缘政治分析师。基于同一事件的完整正文做多源对比，形成详实的态度与时间线脉络。态度标签只用：中立/客观/主观/积极/消极。对国家/行为体必须写清 summary 与 rationale（为什么是该态度），并给出 drivers 与 evidenceQuotes。允许在标明 supplementNote/分析补充 的前提下补全背景因果，但禁止捏造正文未出现的具体数字、日期或引语。只输出 JSON。",
+        "你是资深媒体分析师。基于同一事件完整正文做多源对比。态度标签只用：中立/客观/主观/积极/消极。keyPoints/uniqueInfo 必须是完整论断句（≥12字），禁止单词或单字。countryOrActorAttitudes 仅填国家/政府机构/具名组织或人物；技术产品稿若无此类主体则返回空数组，禁止把仓库名、会议名、年份当行为体。对确有行为体的条目写清 summary 与 rationale。禁止捏造正文未出现的具体数字、日期或引语。只输出 JSON。",
     },
     {
       role: "user",
-      content: `事件：${eventTitle}\n\n本地先验（请校正而非照抄）：\n${prior.slice(0, 2500)}\n\n以下是${batch.length}篇完整报道正文。输出严格 JSON：\n${ARC_JSON_SHAPE}\n\n${docs}`,
+      content: `事件：${eventTitle}\n\n本地先验（态度标量，请校正勿照抄垃圾字段）：\n${prior.slice(0, 2500)}\n\n以下是${batch.length}篇完整报道正文。输出严格 JSON：\n${ARC_JSON_SHAPE}\n\n${docs}`,
     },
   ], { settings: s, maxTokens: 4500, temperature: 0.2 });
   const parsed = parseJsonLoose<Partial<ComparisonResult> & { sources?: Partial<SourceView>[] }>(raw);
@@ -239,7 +240,8 @@ async function llmCompareBatch(
   });
   for (const a of batch) {
     if (!sources.some((x) => x.articleId === a.id)) {
-      const local = analyzeArticleAttitude(a.title, fullBody(a));
+      const body = fullBody(a);
+      const local = analyzeArticleAttitude(a.title, body);
       sources.push({
         articleId: a.id,
         feedTitle: a.feedTitle,
@@ -248,7 +250,7 @@ async function llmCompareBatch(
         stanceLabel: local.label,
         narrative: local.label,
         tone: local.label,
-        keyPoints: extractKeywords(a.title, fullBody(a), 5),
+        keyPoints: extractClaimPoints(a.title, body, 5),
         uniqueInfo: [],
         framingWords: local.framingWords,
         publishedAt: a.publishedAt ? a.publishedAt.toISOString() : null,
@@ -257,15 +259,15 @@ async function llmCompareBatch(
       });
     }
   }
-  return {
+  return sanitizeComparisonFields({
     overallSummary: parsed.overallSummary,
     consensus: parsed.consensus,
     divergences: parsed.divergences,
     timeline: parsed.timeline,
     countryOrActorAttitudes: parsed.countryOrActorAttitudes,
     sources,
-    generatedBy: "llm",
-  };
+    generatedBy: "llm" as const,
+  });
 }
 
 /** External headline search → LLM enrich timeline (ai_supplement) + country rationale. */
@@ -350,7 +352,7 @@ export async function compareEvent(
   layer0.cacheKey = cacheKey;
 
   if (opts?.forceHeuristic || !llmReady(s)) {
-    return { ...layer0, generatedBy: "heuristic" };
+    return sanitizeComparisonFields({ ...layer0, generatedBy: "heuristic" as const });
   }
 
   const cached = compareCache.get(cacheKey);
@@ -358,11 +360,16 @@ export async function compareEvent(
     return { ...cached.result, cacheKey };
   }
 
+  // Clean prior: attitudes only — never seed LLM with garbage actors/unigram points
   const prior = JSON.stringify({
     overallSummary: layer0.overallSummary,
     consensus: layer0.consensus.slice(0, 4),
     divergences: layer0.divergences.slice(0, 4),
-    countryOrActorAttitudes: (layer0.countryOrActorAttitudes || []).slice(0, 6),
+    countryOrActorAttitudes: (layer0.countryOrActorAttitudes || []).slice(0, 6).map((a) => ({
+      actor: a.actor,
+      attitude: a.attitude,
+      score: a.score,
+    })),
     sources: layer0.sources.map((x) => ({
       articleId: x.articleId,
       attitude: x.attitude,
@@ -376,7 +383,7 @@ export async function compareEvent(
     for (const batch of batches) {
       parts.push(await llmCompareBatch(eventTitle, batch, prior, s));
     }
-    let merged = mergeArcPartials(layer0, parts);
+    let merged = sanitizeComparisonFields(mergeArcPartials(layer0, parts));
     if (batches.length > 1) {
       const raw = await chatComplete([
         {
@@ -403,10 +410,11 @@ export async function compareEvent(
         if (hit) merged.sources.push(hit);
       }
     }
+    merged = sanitizeComparisonFields(merged);
     compareCache.set(cacheKey, { at: Date.now(), result: merged });
     return merged;
   } catch {
-    return layer0;
+    return sanitizeComparisonFields(layer0);
   }
 }
 

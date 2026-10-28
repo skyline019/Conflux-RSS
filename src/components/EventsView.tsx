@@ -343,6 +343,12 @@ export default function EventsView(p: Props) {
                   </div>
                 </div>
 
+                {(!comp.countryOrActorAttitudes || comp.countryOrActorAttitudes.length === 0) && (
+                  <p className="anim-fadeUp rounded-xl border border-dashed border-[#e3dccb] bg-[#faf6ec] px-4 py-3 text-[12.5px] text-[#9a917c]">
+                    本稿未识别到明确的国家/机构立场，以下以来源叙述拆解为主（不硬套地缘分析）。
+                  </p>
+                )}
+
                 {comp.countryOrActorAttitudes && comp.countryOrActorAttitudes.length > 0 && (
                   <div className="anim-fadeUp rounded-2xl border border-[#e3dccb] bg-[#fffdf8] p-5">
                     <div className="mb-3 flex items-center gap-2 text-[13px] font-bold text-[#4c4433]">
@@ -460,19 +466,19 @@ export default function EventsView(p: Props) {
                           <div className="mt-2.5 space-y-2 text-[12.5px] leading-[1.7] text-[#57503f]">
                             <p><b className="text-[#4c4433]">叙述框架：</b>{s.narrative || "—"}</p>
                             {s.tone && <p><b className="text-[#4c4433]">语气基调：</b>{s.tone}</p>}
-                            {s.keyPoints.length > 0 && (
+                            {s.keyPoints.filter((k) => String(k).trim().length >= 12).length > 0 && (
                               <div>
                                 <b className="text-[#4c4433]">核心论点：</b>
                                 <ul className="mt-0.5 space-y-0.5">
-                                  {s.keyPoints.map((k, i) => <li key={i} className="flex gap-1.5"><span className="mt-[8px] h-1 w-1 shrink-0 rounded-full bg-[#c9bc97]" />{k}</li>)}
+                                  {s.keyPoints.filter((k) => String(k).trim().length >= 12).map((k, i) => <li key={i} className="flex gap-1.5"><span className="mt-[8px] h-1 w-1 shrink-0 rounded-full bg-[#c9bc97]" />{k}</li>)}
                                 </ul>
                               </div>
                             )}
-                            {s.uniqueInfo.length > 0 && (
+                            {s.uniqueInfo.filter((k) => String(k).trim().length >= 12 && !/^独有关注：[「『].{1,4}[」』]$/.test(String(k))).length > 0 && (
                               <div>
                                 <b className="text-[#4c4433]">独有/强调信息：</b>
                                 <ul className="mt-0.5 space-y-0.5">
-                                  {s.uniqueInfo.map((k, i) => <li key={i} className="flex gap-1.5"><span className="mt-[8px] h-1 w-1 shrink-0 rounded-full bg-[#2b4a7f]" />{k}</li>)}
+                                  {s.uniqueInfo.filter((k) => String(k).trim().length >= 12 && !/^独有关注：[「『].{1,4}[」』]$/.test(String(k))).map((k, i) => <li key={i} className="flex gap-1.5"><span className="mt-[8px] h-1 w-1 shrink-0 rounded-full bg-[#2b4a7f]" />{k}</li>)}
                                 </ul>
                               </div>
                             )}

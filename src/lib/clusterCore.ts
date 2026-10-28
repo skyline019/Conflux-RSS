@@ -74,6 +74,66 @@ function timeMsOf(c: ClusterCand): number {
   return Date.parse(String(raw)) || 0;
 }
 
+export type EventSimilarityExplain = {
+  score: number;
+  titleSimilarity: number;
+  keywordOverlap: number;
+  entityBonus: number;
+  synergyBonus: number;
+  timeDecay: number;
+  sharedEntities: string[];
+  hoursApart: number | null;
+  passedGate: boolean;
+};
+
+/**
+ * Structured breakdown of eventSimilarity — for UI explainers and tests.
+ */
+export function explainEventSimilarity(
+  a: ClusterCand,
+  b: ClusterCand,
+  threshold: number,
+  weights?: Map<string, number>,
+  hoursApart?: number,
+  windowHours = 96,
+): EventSimilarityExplain {
+  const ts = titleSimilarity(a.title, b.title);
+  const ko = keywordOverlapWeighted(a.keywords, b.keywords, weights);
+  const ea = nonGenericEntities(a.title);
+  const eb = new Set(nonGenericEntities(b.title));
+  const sharedEntities = ea.filter((e) => eb.has(e));
+  const entityBonus = sharedEntities.length
+    ? Math.min(0.22, 0.1 + sharedEntities.length * 0.06)
+    : 0;
+  const synergyBonus = ts >= 0.55 && ko >= 0.2 ? 0.06 : 0;
+  let score = ts * 0.45 + ko * 0.4 + entityBonus + synergyBonus;
+  let timeDecay = 1;
+  const hours =
+    hoursApart != null && Number.isFinite(hoursApart)
+      ? hoursApart
+      : (() => {
+          const ta = timeMsOf(a);
+          const tb = timeMsOf(b);
+          return ta && tb ? Math.abs(ta - tb) / 3600000 : null;
+        })();
+  if (hours != null && Number.isFinite(hours)) {
+    timeDecay = 0.7 + 0.3 * Math.exp(-Math.abs(hours) / Math.max(12, windowHours * 0.65));
+    score *= timeDecay;
+  }
+  score = Math.min(1, score);
+  return {
+    score,
+    titleSimilarity: ts,
+    keywordOverlap: ko,
+    entityBonus,
+    synergyBonus,
+    timeDecay,
+    sharedEntities,
+    hoursApart: hours,
+    passedGate: passesEventClusterGate(a, b, score, threshold),
+  };
+}
+
 /**
  * Combined similarity used for event clustering (same event, different wording):
  * title bigrams 45% + IDF-weighted keyword overlap 40% + shared-entity bonus,
@@ -86,19 +146,7 @@ export function eventSimilarity(
   hoursApart?: number,
   windowHours = 96,
 ): number {
-  const ts = titleSimilarity(a.title, b.title);
-  const ko = keywordOverlapWeighted(a.keywords, b.keywords, weights);
-  let score = ts * 0.45 + ko * 0.4;
-  const ea = nonGenericEntities(a.title);
-  const eb = new Set(nonGenericEntities(b.title));
-  const sharedEntities = ea.filter((e) => eb.has(e));
-  if (sharedEntities.length) score += Math.min(0.22, 0.1 + sharedEntities.length * 0.06);
-  if (ts >= 0.55 && ko >= 0.2) score += 0.06;
-  if (hoursApart != null && Number.isFinite(hoursApart)) {
-    const decay = Math.exp(-Math.abs(hoursApart) / Math.max(12, windowHours * 0.65));
-    score *= 0.7 + 0.3 * decay;
-  }
-  return Math.min(1, score);
+  return explainEventSimilarity(a, b, 0, weights, hoursApart, windowHours).score;
 }
 
 /**

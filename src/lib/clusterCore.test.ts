@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clusterEdgeOk,
   eventSimilarity,
+  explainEventSimilarity,
   passesEventClusterGate,
   selectConsistentClusterMatches,
   type ClusterCand,
@@ -85,5 +86,17 @@ describe("clusterCore quality gates", () => {
     const b = cand(2, 5, "同一标题事件报道乙", ["事件"]);
     const score = eventSimilarity(a, b);
     expect(passesEventClusterGate(a, b, Math.max(score, 0.9), THRESH)).toBe(false);
+  });
+
+  it("explainEventSimilarity exposes structured components summing into score", () => {
+    const a = cand(1, 10, "美联储宣布降息25个基点 市场反应积极", ["美联储", "降息"]);
+    const b = cand(2, 20, "美联储宣布降息25个基点 股市应声上涨", ["美联储", "降息", "股市"]);
+    const ex = explainEventSimilarity(a, b, THRESH);
+    expect(ex.score).toBeGreaterThan(0);
+    expect(ex.titleSimilarity).toBeGreaterThan(0.18);
+    expect(ex.timeDecay).toBeGreaterThan(0.5);
+    expect(ex.timeDecay).toBeLessThanOrEqual(1);
+    expect(typeof ex.passedGate).toBe("boolean");
+    expect(ex.score).toBe(eventSimilarity(a, b));
   });
 });

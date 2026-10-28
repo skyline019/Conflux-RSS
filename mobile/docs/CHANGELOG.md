@@ -1,5 +1,10 @@
 # Changelog（手机端）
 
+## 0.2.9
+
+- **搜索列表**：虚拟列表不再被 `anim-fadeUp` 的 transform 覆盖（改用 `top` 定位并禁用行动画），修复多结果重叠堆叠  
+- **聚类分数 UI**：事件详情 / 「同一事件」筛选下可折叠展示标题/关键词/实体/时间衰减分解与过门状态（`ClusterScorePanel` + `explainEventSimilarity`）  
+
 ## 0.2.8
 
 - **聚类质量**：`passesEventClusterGate`（标题下限 / 非通用实体）+ 默认阈值 0.34；analyze 仅最佳匹配+互证，禁止 top-12 星形并簇；InfoQ×Trending 类假事件被门禁拒绝  

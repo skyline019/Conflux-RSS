@@ -1,14 +1,15 @@
 "use client";
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Search, CheckCheck, Star, Layers, Sparkles, Copy, Newspaper, Archive,
   PlayCircle, Images, FileText, ExternalLink, RefreshCw, X, ChevronDown, ChevronUp,
 } from "lucide-react";
 import type { ArticleLite, ExternalSearchHit } from "@/lib/client";
-import { timeAgo, FULLTEXT_LABEL, stanceColor, proxiedImg } from "@/lib/client";
+import { api, timeAgo, FULLTEXT_LABEL, stanceColor, proxiedImg } from "@/lib/client";
 import { highlightTitle } from "@/lib/articleSearch";
 import { Badge, SourceAvatar, Spinner, EmptyState } from "./ui";
+import ClusterScorePanel, { type ScoreMember } from "./ClusterScorePanel";
 
 interface Props {
   title: string;
@@ -45,12 +46,50 @@ export default function ArticleList(p: Props) {
   const isMobile =
     typeof window !== "undefined" && Boolean((window as { __CONFLUX_MOBILE__?: boolean }).__CONFLUX_MOBILE__);
   const [externalOpen, setExternalOpen] = useState(!isMobile);
+  const [filterScoreMembers, setFilterScoreMembers] = useState<ScoreMember[] | null>(null);
   const useVirtual = p.articles.length > 40;
+
+  useEffect(() => {
+    if (p.filterClusterId == null) {
+      setFilterScoreMembers(null);
+      return;
+    }
+    let cancelled = false;
+    void api<{
+      members: {
+        id: number;
+        title: string;
+        keywords?: string[];
+        feedId: number;
+        feedTitle: string;
+        publishedAt: string | null;
+      }[];
+    }>(`/api/clusters/${p.filterClusterId}`)
+      .then((data) => {
+        if (cancelled) return;
+        setFilterScoreMembers(
+          (data.members || []).map((m) => ({
+            id: m.id,
+            title: m.title,
+            keywords: m.keywords || [],
+            feedId: m.feedId,
+            feedTitle: m.feedTitle,
+            publishedAt: m.publishedAt,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setFilterScoreMembers(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [p.filterClusterId]);
   const rowVirtualizer = useVirtualizer({
     count: useVirtual ? p.articles.length : 0,
     getScrollElement: () => listRef.current,
-    estimateSize: () => 118,
-    overscan: 10,
+    estimateSize: () => 152,
+    overscan: 8,
   });
 
   const onTouchStart = (e: React.TouchEvent) => {
@@ -138,17 +177,22 @@ export default function ArticleList(p: Props) {
           </div>
         )}
         {p.filterClusterId != null && p.onClearClusterFilter && (
-          <div className="mt-2 flex items-center gap-2">
-            <span className="inline-flex items-center gap-1 rounded-md bg-[#2b4a7f14] px-2 py-0.5 text-[11px] font-medium text-[#2b4a7f]">
-              <Layers size={11} /> 已按同一事件筛选
-            </span>
-            <button
-              type="button"
-              onClick={p.onClearClusterFilter}
-              className="text-[11px] font-medium text-[#9a917c] underline-offset-2 hover:text-[#e85a1e] hover:underline"
-            >
-              清除
-            </button>
+          <div className="mt-2 space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1 rounded-md bg-[#2b4a7f14] px-2 py-0.5 text-[11px] font-medium text-[#2b4a7f]">
+                <Layers size={11} /> 已按同一事件筛选
+              </span>
+              <button
+                type="button"
+                onClick={p.onClearClusterFilter}
+                className="text-[11px] font-medium text-[#9a917c] underline-offset-2 hover:text-[#e85a1e] hover:underline"
+              >
+                清除
+              </button>
+            </div>
+            {filterScoreMembers && filterScoreMembers.length >= 2 && (
+              <ClusterScorePanel members={filterScoreMembers} defaultOpen />
+            )}
           </div>
         )}
         <div className="mt-2.5 flex items-center gap-1">
@@ -231,23 +275,23 @@ export default function ArticleList(p: Props) {
               const imgCount = a.images?.length || (a.imageUrl ? 1 : 0);
               const thumbSrc = a.imageUrl ? proxiedImg(a.imageUrl, a.resolvedLink || a.link) : "";
               const unwrapped = Boolean(a.resolvedLink && a.resolvedLink !== a.link);
+              // Use `top` (not transform): anim-fadeUp keyframes would clobber translateY
               const virtualStyle = useVirtual
                 ? {
                     position: "absolute" as const,
-                    top: 0,
+                    top: "start" in vrow ? vrow.start : 0,
                     left: 0,
                     width: "100%",
-                    transform: `translateY(${"start" in vrow ? vrow.start : 0}px)`,
                   }
                 : { animationDelay: `${Math.min(i, 12) * 28}ms` };
 
               return (
                 <article
-                  key={a.id}
+                  key={useVirtual && "key" in vrow ? String(vrow.key) : a.id}
                   data-index={i}
                   ref={useVirtual ? rowVirtualizer.measureElement : undefined}
                   onClick={() => p.onSelect(a)}
-                  className={`anim-fadeUp relative cursor-pointer border-b border-[#ece4cf] px-4 py-3.5 transition hover:bg-[#fffdf8] ${
+                  className={`${useVirtual ? "" : "anim-fadeUp"} relative cursor-pointer border-b border-[#ece4cf] px-4 py-3.5 transition hover:bg-[#fffdf8] ${
                     active ? "bg-[#fffdf8]" : ""
                   }`}
                   style={virtualStyle}

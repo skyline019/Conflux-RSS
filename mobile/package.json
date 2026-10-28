@@ -1,7 +1,7 @@
 {
   "name": "conflux-mobile",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "汇阅手机版。数据在本机 SQLite，不连接电脑。",
   "scripts": {
     "dev": "vite",

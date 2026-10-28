@@ -209,6 +209,16 @@ describe("source-guards-no-truncation-paths", () => {
     expect(reader).toContain("createPortal");
     expect(reader).toContain("z-[70]");
     expect(reader).not.toMatch(/paddingTop:\s*"max\(0\.375rem,\s*env\(safe-area-inset-top\)\)"/);
+
+    const list = readFileSync(join(__dirname, "../../src/components/ArticleList.tsx"), "utf8");
+    // Virtual rows must not use transform+anim-fadeUp (animation clobbers translateY)
+    expect(list).toContain('useVirtual ? "" : "anim-fadeUp"');
+    expect(list).toContain("ClusterScorePanel");
+    expect(list).not.toMatch(/transform:\s*`translateY/);
+    expect(core).toContain("explainEventSimilarity");
+    const scorePanel = readFileSync(join(__dirname, "../../src/components/ClusterScorePanel.tsx"), "utf8");
+    expect(scorePanel).toContain("explainEventSimilarity");
+    expect(scorePanel).toContain("标题相似");
   });
 
   it("mobile compare merges batches and enriches with external news", () => {
@@ -226,7 +236,7 @@ describe("source-guards-no-truncation-paths", () => {
   it("diagnostics appVersion comes from package.json", () => {
     const api = readFileSync(join(__dirname, "api.ts"), "utf8");
     const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
-    expect(pkg.version).toBe("0.2.8");
+    expect(pkg.version).toBe("0.2.9");
     expect(api).toContain("APP_VERSION");
     expect(api).toContain('import packageJson from "../package.json"');
     expect(api).not.toMatch(/appVersion:\s*"0\.2\.0"/);

@@ -8,6 +8,7 @@ import type { ClusterRow, Comparison } from "@/lib/client";
 import { api, timeAgo, fmtDateTime, stanceColor } from "@/lib/client";
 import { highlightTitle } from "@/lib/articleSearch";
 import { Badge, SourceAvatar, Spinner, toast, EmptyState } from "./ui";
+import ClusterScorePanel from "./ClusterScorePanel";
 
 interface ClusterMember {
   id: number; title: string; link: string; author: string | null; feedId: number;
@@ -35,6 +36,7 @@ export default function EventsView(p: Props) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
+  const [clusterThreshold, setClusterThreshold] = useState(0.34);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -67,6 +69,14 @@ export default function EventsView(p: Props) {
   useEffect(() => { loadClusters(); }, [loadClusters]);
   useEffect(() => { if (p.focusClusterId) setDetailId(p.focusClusterId); }, [p.focusClusterId]);
   useEffect(() => { if (detailId) loadDetail(detailId); else setDetail(null); }, [detailId, loadDetail]);
+  useEffect(() => {
+    void api<{ settings?: { clusterThreshold?: number }; clusterThreshold?: number }>("/api/settings")
+      .then((res) => {
+        const t = res.settings?.clusterThreshold ?? res.clusterThreshold;
+        if (typeof t === "number" && Number.isFinite(t)) setClusterThreshold(t);
+      })
+      .catch(() => { /* keep default */ });
+  }, []);
 
   const rebuild = async () => {
     setRebuilding(true);
@@ -198,6 +208,9 @@ export default function EventsView(p: Props) {
                     </div>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       <Badge color="#2b4a7f"><Layers size={9} /> {c.articleCount} 篇 · {c.sourceCount} 个来源</Badge>
+                      {typeof c.matchScore === "number" && (
+                        <Badge color="#0e7490">搜索相关 {c.matchScore.toFixed(2)}</Badge>
+                      )}
                       {spread > 0.35
                         ? <Badge color="#c0392b"><Flame size={9} /> 立场分化 {spread.toFixed(2)}</Badge>
                         : <Badge color="#4c7a57"><Scale size={9} /> 基调较一致</Badge>}
@@ -537,8 +550,25 @@ export default function EventsView(p: Props) {
               </div>
             )}
 
-            {/* members */}
+            {/* clustering score structure */}
             <div className="mt-7">
+              <ClusterScorePanel
+                members={detail.members.map((m) => ({
+                  id: m.id,
+                  title: m.title,
+                  keywords: m.keywords || [],
+                  feedId: m.feedId,
+                  feedTitle: m.feedTitle,
+                  publishedAt: m.publishedAt,
+                }))}
+                threshold={clusterThreshold}
+                searchMatchScore={detail.cluster.matchScore}
+                defaultOpen={detail.members.length <= 8}
+              />
+            </div>
+
+            {/* members */}
+            <div className="mt-5">
               <div className="mb-3 text-[14px] font-bold">参与报道（{detail.members.length}）</div>
               <div className="divide-y divide-[#eee6d2] rounded-2xl border border-[#e3dccb] bg-[#fffdf8]">
                 {detail.members.map((m) => (

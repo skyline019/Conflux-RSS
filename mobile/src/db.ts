@@ -1,7 +1,7 @@
 import initSqlJs, { type Database } from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const SCHEMA = `
 create table if not exists settings (key text primary key, value text not null);
@@ -209,7 +209,58 @@ function migrate() {
     ver = 4;
     setSchemaVersion(4);
   }
+  // v4→v5 article FTS5 index
+  if (ver < 5) {
+    ensureArticlesFts();
+    ver = 5;
+    setSchemaVersion(5);
+  }
   if (ver < SCHEMA_VERSION) setSchemaVersion(SCHEMA_VERSION);
+}
+
+function ftsExists(): boolean {
+  try {
+    const row = get<{ n: number }>("select count(*) as n from sqlite_master where type = 'table' and name = 'articles_fts'");
+    return Number(row?.n || 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Create FTS5 table if missing (tokenized docs filled by api upsert/rebuild). */
+export function ensureArticlesFts() {
+  if (!ftsExists()) {
+    db.run(`create virtual table articles_fts using fts5(doc, tokenize = 'unicode61')`);
+  }
+}
+
+export function clearArticlesFts() {
+  if (ftsExists()) db.run("delete from articles_fts");
+}
+
+export function upsertArticleFtsRow(articleId: number, doc: string) {
+  ensureArticlesFts();
+  try {
+    db.run("delete from articles_fts where rowid = ?", [articleId]);
+  } catch { /* ignore */ }
+  db.run("insert into articles_fts(rowid, doc) values(?, ?)", [articleId, doc || ""]);
+}
+
+export function deleteArticleFtsRow(articleId: number) {
+  if (!ftsExists()) return;
+  try {
+    db.run("delete from articles_fts where rowid = ?", [articleId]);
+  } catch { /* ignore */ }
+}
+
+export function deleteArticlesFtsForFeed(feedId: number) {
+  if (!ftsExists()) return;
+  try {
+    db.run(
+      "delete from articles_fts where rowid in (select id from articles where feed_id = ?)",
+      [feedId],
+    );
+  } catch { /* ignore */ }
 }
 
 export function getSchemaVersion(): number {

@@ -27,6 +27,8 @@ export interface ArticleLite {
   stanceScore: number | null; publishedAt: string | null; fetchedAt: string; createdAt: string;
   feedTitle: string; feedColor: string; feedCategory: string; excerpt?: string;
   scrollOffset?: number;
+  /** True when this row was pulled in via same-cluster expansion (not a direct FTS hit). */
+  relatedViaCluster?: boolean;
 }
 
 export function proxiedImg(url: string | null | undefined, referer?: string | null): string {
@@ -53,6 +55,9 @@ export interface AiJson {
   quality?: { depth?: number; evidence?: number; novelty?: number; note?: string };
   questions?: string[];
   reading_time_min?: number;
+  background?: string;
+  whatHappened?: string;
+  implications?: string;
 }
 
 export interface ArticleFull extends ArticleLite {
@@ -154,22 +159,58 @@ export interface ClusterRow {
   comparison: Comparison | null; comparisonSource: string | null; comparedAt: string | null;
   members?: { id: number; title: string; feedTitle: string; feedColor: string; stanceScore: number | null; publishedAt: string | null }[];
   stanceSpread?: number; hasComparison?: boolean;
+  /** Present when listing with ?search= */
+  matchScore?: number;
 }
 
 export interface SourceView {
   articleId: number; feedTitle: string; title: string; stanceScore: number; stanceLabel: string;
   narrative: string; tone: string; keyPoints: string[]; uniqueInfo: string[]; framingWords: string[];
   publishedAt: string | null;
+  attitude?: { valence: number; objectivity: number; label: string };
+  actorMentions?: {
+    actor: string;
+    attitude: string;
+    score: number;
+    evidenceSpan?: string;
+    summary?: string;
+    rationale?: string;
+    drivers?: string[];
+    evidenceQuotes?: string[];
+    supplementNote?: string;
+  }[];
 }
 
 export interface Comparison {
   overallSummary: string;
   consensus: string[];
   divergences: { aspect: string; description: string }[];
-  timeline: { time: string; event: string; source: string }[];
+  timeline: {
+    time: string;
+    event: string;
+    source: string;
+    timeNorm?: string | null;
+    confidence?: number;
+    actors?: string[];
+    detail?: string;
+    impact?: string;
+    kind?: "reported" | "ai_supplement";
+  }[];
+  countryOrActorAttitudes?: {
+    actor: string;
+    attitude: string;
+    score: number;
+    evidenceSpan?: string;
+    summary?: string;
+    rationale?: string;
+    drivers?: string[];
+    evidenceQuotes?: string[];
+    supplementNote?: string;
+  }[];
   sources: SourceView[];
   generatedBy: "llm" | "heuristic";
   model?: string;
+  cacheKey?: string;
 }
 
 export interface CollectionRow {
@@ -185,6 +226,30 @@ export interface ClientSettings {
   dedupTitleThreshold: number; dedupSimhashDistance: number;
   clusterThreshold: number; clusterWindowHours: number;
   proxyEnabled?: boolean; proxyUrl?: string;
+}
+
+export interface ExternalSearchHit {
+  title: string;
+  url: string;
+  source: string;
+  snippet?: string;
+  score?: number;
+  libraryDuplicate?: boolean;
+}
+
+export interface SearchAggregateResult {
+  q: string;
+  engine: "fts" | "fts+llm";
+  library: ArticleLite[];
+  clusters?: { id: number; title: string; matchScore: number }[];
+  external: ExternalSearchHit[];
+  meta: {
+    libraryTotal: number;
+    llmUsed: boolean;
+    llmCacheHit: boolean;
+    externalOk: boolean;
+    tookMs: number;
+  };
 }
 
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {

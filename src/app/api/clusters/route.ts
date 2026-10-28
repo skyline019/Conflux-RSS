@@ -1,19 +1,20 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { clusters, articles, feeds } from "@/db/schema";
 import { eq, desc, sql } from "drizzle-orm";
 import { ensureSeeded } from "@/lib/seed";
+import { rankClustersByQuery } from "@/lib/eventSearch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   await ensureSeeded();
+  const search = (req.nextUrl.searchParams.get("search") || "").trim();
   const rows = await db.select().from(clusters)
     .where(sql`${clusters.articleCount} >= 2`)
     .orderBy(desc(clusters.lastSeenAt)).limit(100);
 
-  // attach top sources + stance spread per cluster
   const enriched = await Promise.all(rows.map(async (c) => {
     const members = await db.select({
       id: articles.id, title: articles.title, feedTitle: feeds.title, feedColor: feeds.iconColor,
@@ -28,5 +29,21 @@ export async function GET() {
       hasComparison: Boolean(c.comparison),
     };
   }));
-  return NextResponse.json({ clusters: enriched });
+
+  if (!search) {
+    return NextResponse.json({ clusters: enriched, total: enriched.length });
+  }
+
+  const ranked = rankClustersByQuery(
+    search,
+    enriched.map((c) => ({
+      ...c,
+      memberTitles: (c.members || []).map((m) => m.title),
+      lastSeenAt: c.lastSeenAt,
+    })),
+  );
+  return NextResponse.json({
+    clusters: ranked.map(({ memberTitles: _mt, ...rest }) => rest),
+    total: ranked.length,
+  });
 }

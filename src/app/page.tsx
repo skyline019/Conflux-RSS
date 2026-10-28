@@ -6,8 +6,9 @@ import ArticleList from "@/components/ArticleList";
 import Reader from "@/components/Reader";
 import TodayView from "@/components/TodayView";
 import AddFeedModal from "@/components/AddFeedModal";
+import MobileTabBar, { MOBILE_TAB_HEIGHT, viewToMobileTab, type MobileTab } from "@/components/MobileTabBar";
 import { Spinner, toast } from "@/components/ui";
-import type { FeedRow, ArticleLite, CollectionRow, ClientSettings } from "@/lib/client";
+import type { FeedRow, ArticleLite, CollectionRow, ClientSettings, ExternalSearchHit, SearchAggregateResult } from "@/lib/client";
 import { api } from "@/lib/client";
 
 const EventsView = lazy(() => import("@/components/EventsView"));
@@ -49,6 +50,10 @@ export default function HomePage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   selectedIdRef.current = selectedId;
   const [focusClusterId, setFocusClusterId] = useState<number | null>(null);
+  const [filterClusterId, setFilterClusterId] = useState<number | null>(null);
+  const [externalHits, setExternalHits] = useState<ExternalSearchHit[]>([]);
+  const [searchEngine, setSearchEngine] = useState<"fts" | "fts+llm" | null>(null);
+  const [searchMeta, setSearchMeta] = useState<{ tookMs?: number; llmUsed?: boolean; externalOk?: boolean } | null>(null);
 
   const [showAddFeed, setShowAddFeed] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -56,8 +61,12 @@ export default function HomePage() {
   const [refreshingFeedId, setRefreshingFeedId] = useState<number | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [bgRefreshing, setBgRefreshing] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const wasOffline = useRef(false);
+  const mobile = isMobileApp();
 
   /* ---------- Day / Night theme ---------- */
   useEffect(() => {
@@ -75,10 +84,18 @@ export default function HomePage() {
       const next = !prev;
       document.documentElement.classList.toggle("dark", next);
       try { localStorage.setItem("conflux-theme", next ? "dark" : "light"); } catch { /* ignore */ }
+      const w = window as Window & { __confluxSetStatusBarTheme?: (dark: boolean) => void };
+      w.__confluxSetStatusBarTheme?.(next);
       toast(next ? "🌙 已切换至夜间护眼模式" : "☀️ 已切换至日间纸墨模式", "info");
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    if (!isMobileApp()) return;
+    const w = window as Window & { __confluxSetStatusBarTheme?: (dark: boolean) => void };
+    w.__confluxSetStatusBarTheme?.(darkMode);
+  }, [darkMode]);
 
   /* ---------- toasts ---------- */
   useEffect(() => {
@@ -130,23 +147,69 @@ export default function HomePage() {
     qs.set("view", v);
     if (selection.kind === "feed") qs.set("feedId", String(selection.id));
     if (selection.kind === "category") qs.set("category", selection.name);
-    if (debouncedSearch.trim()) qs.set("search", debouncedSearch.trim());
+    if (filterClusterId) qs.set("clusterId", String(filterClusterId));
+    if (debouncedSearch.trim()) {
+      qs.set("search", debouncedSearch.trim());
+      if (!filterClusterId) qs.set("related", "1");
+    }
     return qs.toString();
-  }, [selection, tab, debouncedSearch]);
+  }, [selection, tab, debouncedSearch, filterClusterId]);
 
   const loadArticles = useCallback(async (pageNum = 1, append = false) => {
     if (append) setLoadingMore(true); else setListLoading(true);
+    loadAbortRef.current?.abort();
+    const ac = new AbortController();
+    loadAbortRef.current = ac;
     try {
+      const q = debouncedSearch.trim();
+      // Smart aggregate for first page of a search (library + external sections)
+      if (q && pageNum === 1 && !append) {
+        const qs = new URLSearchParams({ q, limit: "60", related: filterClusterId ? "0" : "1", external: "1" });
+        let v = "inbox";
+        if (selection.kind === "unread") v = "unread";
+        else if (selection.kind === "starred") v = "starred";
+        else if (selection.kind === "media") v = "media";
+        else if (tab === "unread") v = "unread";
+        else if (tab === "starred") v = "starred";
+        qs.set("view", v);
+        if (selection.kind === "feed") qs.set("feedId", String(selection.id));
+        if (selection.kind === "category") qs.set("category", selection.name);
+        if (filterClusterId) qs.set("clusterId", String(filterClusterId));
+        const res = await fetch(`/api/search/aggregate?${qs}`, { signal: ac.signal });
+        const data = await res.json() as SearchAggregateResult & { error?: string };
+        if (!res.ok) throw new Error(data.error || "搜索失败");
+        if (ac.signal.aborted) return;
+        setArticles(data.library || []);
+        setTotal(data.meta?.libraryTotal ?? data.library?.length ?? 0);
+        setExternalHits(data.external || []);
+        setSearchEngine(data.engine || "fts");
+        setSearchMeta({
+          tookMs: data.meta?.tookMs,
+          llmUsed: data.meta?.llmUsed,
+          externalOk: data.meta?.externalOk,
+        });
+        setPage(1);
+        return;
+      }
+      if (!q) {
+        setExternalHits([]);
+        setSearchEngine(null);
+        setSearchMeta(null);
+      }
       const data = await api<{ articles: ArticleLite[]; total: number }>(`/api/articles?${queryFor(pageNum)}`);
+      if (ac.signal.aborted) return;
       setArticles((prev) => (append ? [...prev, ...data.articles] : data.articles));
       setTotal(data.total);
       setPage(pageNum);
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
       toast(e instanceof Error ? e.message : "加载文章失败", "error");
     } finally {
-      setListLoading(false); setLoadingMore(false);
+      if (!ac.signal.aborted) {
+        setListLoading(false); setLoadingMore(false);
+      }
     }
-  }, [queryFor]);
+  }, [queryFor, debouncedSearch, filterClusterId, selection, tab]);
 
   /* ---------- boot ---------- */
   useEffect(() => {
@@ -187,7 +250,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!booting && view === "read") loadArticles(1);
-  }, [booting, view, selection, tab, debouncedSearch, loadArticles]);
+  }, [booting, view, selection, tab, debouncedSearch, filterClusterId, loadArticles]);
 
   /* mobile native shell bridges via window (no import of Capacitor into Next bundle) */
   useEffect(() => {
@@ -205,11 +268,19 @@ export default function HomePage() {
     w.__confluxNativeHooks = {
       getSelectedId: () => selectedIdRef.current,
       onBack: () => {
+        if (sidebarOpen) {
+          setSidebarOpen(false);
+          return true;
+        }
         if (selectedIdRef.current) {
           setSelectedId(null);
           return true;
         }
-        if (view !== "today" && view !== "read") {
+        if (view === "events" || view === "settings" || view === "rules" || view === "archive" || view === "stats") {
+          setView("today");
+          return true;
+        }
+        if (view === "read") {
           setView("today");
           return true;
         }
@@ -222,25 +293,48 @@ export default function HomePage() {
         toast(`已收到链接，可在订阅广场添加：${url.slice(0, 64)}`, "info");
         try { sessionStorage.setItem("conflux.pendingAddUrl", url); } catch { /* */ }
       },
-      onBackgroundRefreshDone: async () => {
+      onBackgroundRefreshDone: async (added: number) => {
+        setBgRefreshing(false);
         await refreshMeta();
         if (view === "read") loadArticles(1);
-        if (view === "today") {
-          /* TodayView reloads when refreshing flag toggles; nudge via feeds */
-          await loadFeeds();
-        }
+        if (view === "today") await loadFeeds();
+        if (added > 0) toast(`后台刷新完成 · 新增 ${added} 篇`);
+        else toast("后台刷新完成 · 暂无新文", "info");
       },
     };
     window.dispatchEvent(new Event("confluxHooksUpdated"));
+    const onBg = (e: Event) => {
+      const running = Boolean((e as CustomEvent<{ running?: boolean }>).detail?.running);
+      setBgRefreshing(running);
+    };
+    window.addEventListener("confluxBgRefresh", onBg);
+    const wb = window as Window & { __confluxBgRefreshRunning?: () => boolean };
+    if (typeof wb.__confluxBgRefreshRunning === "function") {
+      setBgRefreshing(wb.__confluxBgRefreshRunning());
+    }
+    const applyOnline = (online: boolean) => {
+      const off = !online;
+      if (wasOffline.current && !off) toast("网络已恢复", "info");
+      wasOffline.current = off;
+      setOffline(off);
+    };
+    const onOnline = (e: Event) => {
+      const online = Boolean((e as CustomEvent<{ online?: boolean }>).detail?.online);
+      applyOnline(online);
+    };
+    window.addEventListener("confluxOnline", onOnline);
+    if (typeof w.__confluxIsOnline === "function") applyOnline(w.__confluxIsOnline());
     const tick = window.setInterval(() => {
-      setOffline(typeof w.__confluxIsOnline === "function" ? !w.__confluxIsOnline() : false);
-    }, 4000);
+      if (typeof w.__confluxIsOnline === "function") applyOnline(w.__confluxIsOnline());
+    }, 15000);
     return () => {
       window.clearInterval(tick);
+      window.removeEventListener("confluxBgRefresh", onBg);
+      window.removeEventListener("confluxOnline", onOnline);
       delete w.__confluxNativeHooks;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [booting, view]);
+  }, [booting, view, sidebarOpen]);
 
   const refreshMeta = useCallback(async () => {
     await Promise.all([loadFeeds(), loadClusterMeta(), loadCollections()]);
@@ -249,7 +343,7 @@ export default function HomePage() {
   /* ---------- refresh actions ---------- */
   const refreshAll = async () => {
     setRefreshingAll(true);
-    setRefreshHint("连接抓取流…");
+    setRefreshHint("正在抓取…");
     try {
       const res = await fetch("/api/feeds/refresh/stream", { method: "POST" });
       if (!res.ok || !res.body) throw new Error("刷新流未建立");
@@ -274,6 +368,9 @@ export default function HomePage() {
             totals?: typeof totals;
           };
           if (ev.type === "error") throw new Error(ev.message || "刷新失败");
+          if (ev.type === "start") {
+            setRefreshHint(ev.total ? `准备抓取 ${ev.total} 个源…` : (ev.message || "正在抓取…"));
+          }
           if (ev.totals) totals = ev.totals;
           if (ev.type === "feed" && ev.result) {
             setRefreshHint(`${ev.done}/${ev.total} · ${ev.result.feedTitle}${ev.result.added ? ` +${ev.result.added}` : ""}`);
@@ -358,11 +455,49 @@ export default function HomePage() {
   /* ---------- navigation helpers ---------- */
   const goSelect = (s: Selection) => {
     setSelection(s);
+    setFilterClusterId(null);
     setView("read");
     setSelectedId(null);
     setSidebarOpen(false);
   };
-  const goView = (v: View) => { setView(v); setSidebarOpen(false); if (v !== "events") setFocusClusterId(null); };
+
+  const filterByCluster = (id: number) => {
+    setFilterClusterId(id);
+    setSelectedId(null);
+    setView("read");
+  };
+  const goView = (v: View) => {
+    setView(v);
+    setSidebarOpen(false);
+    if (v !== "events") setFocusClusterId(null);
+    if (v !== "read") setSelectedId(null);
+  };
+
+  const onMobileTab = (tabId: MobileTab) => {
+    if (tabId === "today") goView("today");
+    else if (tabId === "read") {
+      setSelection({ kind: "all" });
+      goView("read");
+    } else if (tabId === "events") goView("events");
+    else goView("settings");
+  };
+
+  const refreshAllGuarded = async () => {
+    if (offline) {
+      toast("当前离线，无法刷新订阅", "error");
+      return;
+    }
+    const wb = window as Window & { __confluxBgRefreshRunning?: () => boolean };
+    if (typeof wb.__confluxBgRefreshRunning === "function" && wb.__confluxBgRefreshRunning()) {
+      toast("后台刷新进行中，请稍候", "info");
+      return;
+    }
+    await refreshAll();
+  };
+
+  const effectiveRefreshHint = bgRefreshing
+    ? (refreshHint || "后台刷新中…")
+    : refreshHint;
 
   const openArticle = (id: number) => {
     setView("read");
@@ -380,6 +515,7 @@ export default function HomePage() {
   }, [loadFeeds]);
 
   const listTitle = useMemo(() => {
+    if (filterClusterId) return "同一事件";
     switch (selection.kind) {
       case "unread": return "未读文章";
       case "starred": return "星标收藏";
@@ -388,7 +524,7 @@ export default function HomePage() {
       case "category": return `${selection.name} · 专栏`;
       default: return debouncedSearch ? `搜索「${debouncedSearch}」` : "全部文章";
     }
-  }, [selection, feeds, debouncedSearch]);
+  }, [selection, feeds, debouncedSearch, filterClusterId]);
 
   const categories = useMemo(() => [...new Set(feeds.map((f) => f.category))], [feeds]);
 
@@ -434,11 +570,11 @@ export default function HomePage() {
       onView={goView}
       onSelect={(s) => goSelect(s)}
       onAddFeed={() => setShowAddFeed(true)}
-      onRefreshAll={refreshAll}
+      onRefreshAll={refreshAllGuarded}
       onRefreshFeed={refreshFeed}
       onDeleteFeed={deleteFeed}
-      refreshingAll={refreshingAll}
-      refreshHint={refreshHint}
+      refreshingAll={refreshingAll || bgRefreshing}
+      refreshHint={effectiveRefreshHint}
       refreshingFeedId={refreshingFeedId}
       llmReady={llmReady}
       clusterCount={clusterCount}
@@ -451,29 +587,50 @@ export default function HomePage() {
     <div className="flex flex-1 items-center justify-center gap-2 text-[13px] text-[#9a917c]"><Spinner /> 加载中…</div>
   );
 
+  const totalUnread = feeds.reduce((n, f) => n + (Number(f.unread) || 0), 0);
+
+  const tabPad = `calc(${MOBILE_TAB_HEIGHT}px + env(safe-area-inset-bottom))`;
+  const offlineBannerH = 32;
+
   return (
-    <div className="flex h-screen overflow-hidden bg-[#f6f3ec] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+    <div
+      className={`flex h-screen overflow-hidden bg-[#f6f3ec] ${
+        mobile ? "pt-0" : "pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]"
+      }`}
+      style={mobile ? { paddingBottom: tabPad } : undefined}
+    >
       {offline && (
-        <div className="fixed inset-x-0 top-0 z-[70] flex items-center justify-center gap-1.5 bg-[#1b1812] px-3 py-1.5 text-[12px] text-[#f5e6c8]">
+        <div
+          className="fixed inset-x-0 z-[70] flex items-center justify-center gap-1.5 bg-[#1b1812] px-3 py-1.5 text-[12px] text-[#f5e6c8]"
+          style={{ top: mobile ? "env(safe-area-inset-top)" : 0, minHeight: offlineBannerH }}
+        >
           <WifiOff size={12} /> 离线中 · 仍可阅读本地已抓取内容
         </div>
       )}
       {/* desktop sidebar */}
       <div className="hidden lg:block">{sidebarEl}</div>
-      {/* mobile sidebar overlay */}
+      {/* mobile sidebar overlay — above TabBar */}
       {sidebarOpen && (
-        <div className="fixed inset-0 z-40 lg:hidden">
+        <div className="fixed inset-0 z-[65] lg:hidden">
           <div className="absolute inset-0 bg-black/50" onClick={() => setSidebarOpen(false)} />
-          <div className="anim-fadeIn absolute inset-y-0 left-0">{sidebarEl}</div>
+          <div
+            className="anim-fadeIn absolute inset-y-0 left-0"
+            style={{ paddingBottom: mobile ? tabPad : undefined }}
+          >
+            {sidebarEl}
+          </div>
         </div>
       )}
 
-      <main className={`flex min-h-0 min-w-0 flex-1 ${view === "read" || view === "today" ? "" : "flex-col [&>section]:min-h-0"}`}>
-        {view !== "read" && view !== "today" && (
+      <main
+        className={`flex min-h-0 min-w-0 flex-1 ${view === "read" || view === "today" ? "" : "flex-col [&>section]:min-h-0"}`}
+        style={offline ? { paddingTop: offlineBannerH } : undefined}
+      >
+        {view !== "read" && view !== "today" && view !== "settings" && view !== "events" && (
           <button
             type="button"
-            onClick={() => goView(isMobileApp() ? "today" : "read")}
-            className="flex h-12 w-full shrink-0 items-center gap-1.5 border-b border-[#e3dccb] bg-[#faf7ef] px-3 text-[14px] font-medium text-[#4c4433] lg:hidden"
+            onClick={() => goView(mobile ? "today" : "read")}
+            className="flex h-12 min-h-[44px] w-full shrink-0 items-center gap-1.5 border-b border-[#e3dccb] bg-[#faf7ef] px-3 text-[14px] font-medium text-[#4c4433] lg:hidden"
           >
             <ChevronLeft size={18} /> 返回
           </button>
@@ -482,16 +639,16 @@ export default function HomePage() {
           <div className="relative flex h-full min-h-0 flex-1 flex-col">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="absolute left-3 top-3.5 z-10 flex h-8 w-8 items-center justify-center rounded-lg bg-white shadow ring-1 ring-[#e3dccb] lg:hidden"
+              className="absolute left-3 top-3.5 z-10 flex h-11 w-11 items-center justify-center rounded-xl bg-white shadow ring-1 ring-[#e3dccb] lg:hidden"
               aria-label="打开导航"
             >
-              <Menu size={16} />
+              <Menu size={18} />
             </button>
             <TodayView
               feeds={feeds}
-              refreshing={refreshingAll}
-              refreshHint={refreshHint}
-              onRefreshAll={refreshAll}
+              refreshing={refreshingAll || bgRefreshing}
+              refreshHint={effectiveRefreshHint}
+              onRefreshAll={refreshAllGuarded}
               onOpenArticle={(id) => { setView("read"); setSelectedId(id); }}
               onOpenInbox={() => { setView("read"); setSelection({ kind: "all" }); }}
             />
@@ -502,10 +659,10 @@ export default function HomePage() {
             <div className={`relative h-full min-h-0 ${selectedId ? "hidden md:flex" : "flex"} max-md:flex-1`}>
               <button
                 onClick={() => setSidebarOpen(true)}
-                className="absolute left-3 top-3.5 z-10 flex h-8 w-8 items-center justify-center rounded-lg bg-white shadow ring-1 ring-[#e3dccb] lg:hidden"
+                className="absolute left-3 top-3.5 z-10 flex h-11 w-11 items-center justify-center rounded-xl bg-white shadow ring-1 ring-[#e3dccb] lg:hidden"
                 aria-label="打开导航"
               >
-                <Menu size={16} />
+                <Menu size={18} />
               </button>
               <div className="h-full max-md:[&>section]:w-auto max-md:[&>section]:flex-1">
                 <ArticleList
@@ -517,7 +674,7 @@ export default function HomePage() {
                   search={search}
                   tab={tab}
                   onTab={setTab}
-                  onSearch={setSearch}
+                  onSearch={(s) => { setSearch(s); if (!s.trim()) setFilterClusterId(null); }}
                   onSelect={(a) => setSelectedId(a.id)}
                   onMarkAllRead={markAllRead}
                   onBatchFullText={batchFullText}
@@ -526,7 +683,13 @@ export default function HomePage() {
                   hasMore={articles.length < total}
                   loadingMore={loadingMore}
                   clusterSizes={clusterSizes}
-                  onRefresh={refreshAll}
+                  filterClusterId={filterClusterId}
+                  onFilterCluster={filterByCluster}
+                  onClearClusterFilter={() => setFilterClusterId(null)}
+                  externalHits={externalHits}
+                  searchEngine={searchEngine}
+                  searchMeta={searchMeta}
+                  onRefresh={refreshAllGuarded}
                   refreshing={refreshingAll}
                 />
               </div>
@@ -581,8 +744,13 @@ export default function HomePage() {
         }}
       />
 
-      {/* toasts */}
-      <div className="pointer-events-none fixed bottom-5 right-5 z-[60] space-y-2">
+      {/* toasts — above tab bar + safe area on mobile */}
+      <div
+        className={`pointer-events-none fixed z-[80] space-y-2 ${
+          mobile ? "inset-x-0 flex flex-col items-center px-4" : "bottom-5 right-5"
+        }`}
+        style={mobile ? { bottom: tabPad } : undefined}
+      >
         {toasts.map((t) => (
           <div key={t.id} className="anim-fadeUp pointer-events-auto flex max-w-sm items-start gap-2 rounded-xl bg-[#1b1812] px-4 py-3 text-[13px] leading-5 text-white shadow-2xl">
             {t.type === "success" && <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-400" />}
@@ -592,6 +760,15 @@ export default function HomePage() {
           </div>
         ))}
       </div>
+
+      {mobile && (
+        <MobileTabBar
+          active={viewToMobileTab(view)}
+          unreadHint={totalUnread}
+          eventHint={clusterCount}
+          onTab={onMobileTab}
+        />
+      )}
     </div>
   );
 }

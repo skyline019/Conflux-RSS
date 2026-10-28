@@ -24,6 +24,7 @@ const EXPECTED = [
   "/api/backup",
   "/api/opml",
   "/api/media/parse",
+  "/api/search/aggregate",
 ];
 
 describe("mobile API shim coverage", () => {
@@ -36,7 +37,6 @@ describe("mobile API shim coverage", () => {
         .replace("/:id/", "/")
         .replace(":id", "")
         .replace(/\/$/, "");
-      // match path literals used in handleApi
       const ok =
         src.includes(`"${route.split("/:")[0]}`) ||
         src.includes(`'${route.split("/:")[0]}`) ||
@@ -58,5 +58,30 @@ describe("mobile API shim coverage", () => {
   it("stores LLM key via Preferences helpers", () => {
     expect(src).toContain("getLlmApiKey");
     expect(src).toContain("setLlmApiKey");
+  });
+
+  it("implements FTS-backed article search", () => {
+    expect(src).toContain("buildFtsMatchExpression");
+    expect(src).toContain("articles_fts");
+    expect(src).toContain("rebuildAllArticleFts");
+  });
+
+  it("supports cluster fuzzy search and related article expand", () => {
+    expect(src).toContain("rankClustersByQuery");
+    expect(src).toContain("expandArticleHitsWithClusters");
+    expect(src).toContain('sp.get("related")');
+    expect(src).toContain("relatedViaCluster");
+    expect(src).toContain('sp.get("search")');
+  });
+
+  it("implements strong search aggregate without Meili/reindex", () => {
+    expect(src).toContain("/api/search/aggregate");
+    expect(src).toContain("runSearchAggregateCore");
+    expect(src).toContain("llmUsed");
+    expect(src).not.toContain("/api/search/reindex");
+    expect(src).not.toContain("reindexMeili");
+    expect(src).not.toContain("resolveMeiliConfig");
+    expect(src).not.toContain("searchMeiliArticles");
+    expect(src).not.toContain("meiliOk");
   });
 });

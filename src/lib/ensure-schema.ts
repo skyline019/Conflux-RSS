@@ -8,5 +8,10 @@ export async function ensureRuntimeSchema() {
   await pool.query(`ALTER TABLE articles ADD COLUMN IF NOT EXISTS ai_json jsonb`);
   await pool.query(`ALTER TABLE feeds ADD COLUMN IF NOT EXISTS http_etag text`);
   await pool.query(`ALTER TABLE feeds ADD COLUMN IF NOT EXISTS http_last_modified text`);
+  await pool.query(`ALTER TABLE articles ADD COLUMN IF NOT EXISTS search_document text`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS articles_search_document_gin
+    ON articles USING gin (to_tsvector('simple', coalesce(search_document, '')))
+  `);
   ensured = true;
 }

@@ -93,11 +93,13 @@ public class BackgroundRefreshPlugin extends Plugin {
     public void complete(PluginCall call) {
         String title = call.getString("title", "汇阅 · 刷新完成");
         String text = call.getString("text", "订阅已更新");
+        int added = call.getInt("added", 0);
         RefreshForegroundService svc = RefreshForegroundService.getInstance();
         if (svc != null) {
-            svc.showCompleted(title, text);
+            svc.showCompleted(title, text, added);
         } else {
-            // Service already gone — still fine
+            // FGS already gone — still post the done notification so the user is not left silent
+            RefreshForegroundService.postDoneNotification(getContext(), title, text, added, false);
             Intent stop = new Intent(getContext(), RefreshForegroundService.class);
             stop.setAction(RefreshForegroundService.ACTION_STOP);
             try { getContext().startService(stop); } catch (Exception ignored) { }
@@ -109,7 +111,11 @@ public class BackgroundRefreshPlugin extends Plugin {
     public void fail(PluginCall call) {
         String text = call.getString("text", "刷新出错");
         RefreshForegroundService svc = RefreshForegroundService.getInstance();
-        if (svc != null) svc.showFailed(text);
+        if (svc != null) {
+            svc.showFailed(text);
+        } else {
+            RefreshForegroundService.postDoneNotification(getContext(), "汇阅 · 刷新失败", text, 0, true);
+        }
         call.resolve();
     }
 

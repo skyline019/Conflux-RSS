@@ -2,10 +2,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Layers, RefreshCw, Sparkles, ArrowLeft, CheckCircle2, GitCompareArrows, Clock3,
-  ExternalLink, Scale, Quote, Eye, Flame, Bot, Cpu, ChevronRight,
+  ExternalLink, Scale, Quote, Eye, Flame, Bot, Cpu, ChevronRight, Search,
 } from "lucide-react";
 import type { ClusterRow, Comparison } from "@/lib/client";
 import { api, timeAgo, fmtDateTime, stanceColor } from "@/lib/client";
+import { highlightTitle } from "@/lib/articleSearch";
 import { Badge, SourceAvatar, Spinner, toast, EmptyState } from "./ui";
 
 interface ClusterMember {
@@ -31,18 +32,27 @@ export default function EventsView(p: Props) {
   const [comparing, setComparing] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildHint, setRebuildHint] = useState("");
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
 
   const loadClusters = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api<{ clusters: ClusterRow[] }>("/api/clusters");
+      const qs = debouncedSearch ? `?search=${encodeURIComponent(debouncedSearch)}` : "";
+      const data = await api<{ clusters: ClusterRow[]; total?: number }>(`/api/clusters${qs}`);
       setClusters(data.clusters);
-      p.onCountChange(data.clusters.length);
+      p.onCountChange(data.total ?? data.clusters.length);
     } catch (e) {
       toast(e instanceof Error ? e.message : "加载事件失败", "error");
     } finally { setLoading(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [debouncedSearch]);
 
   const loadDetail = useCallback(async (id: number) => {
     setDetailLoading(true);
@@ -97,7 +107,13 @@ export default function EventsView(p: Props) {
 
   const compare = async (forceHeuristic = false) => {
     if (!detail) return;
+    const w = window as Window & { __confluxIsOnline?: () => boolean };
+    if (!forceHeuristic && typeof w.__confluxIsOnline === "function" && !w.__confluxIsOnline()) {
+      toast("当前离线，无法调用大模型对比；可改用本地算法", "error");
+      return;
+    }
     setComparing(true);
+    setWhyOpen({});
     try {
       const res = await api<{ comparison: Comparison }>(`/api/clusters/${detail.cluster.id}/compare`, {
         method: "POST", body: JSON.stringify({ forceHeuristic }),
@@ -117,19 +133,35 @@ export default function EventsView(p: Props) {
   if (!detailId) {
     return (
       <section className="min-w-0 flex-1 overflow-y-auto bg-[#f6f3ec]">
-        <div className="mx-auto max-w-5xl px-6 py-6">
+        <div className="mx-auto max-w-5xl px-4 py-5 md:px-6 md:py-6">
           <div className="anim-fadeUp flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h1 className="font-serif text-[24px] font-black">事件聚类 · 多源对比</h1>
-              <p className="mt-1 max-w-2xl text-[13px] leading-6 text-[#6d6450]">
-                系统按标题相似度、关键词重叠与时间窗，把<b>不同来源对同一事件</b>的报道自动聚合；点开任一事件即可对比各方的
-                <b>共识事实、叙述框架、态度立场与信息取舍</b>。{p.llmReady ? "大模型已接入，将进行深度语义对比。" : "未接入大模型时使用本地词法/立场词典算法，接入后升级为深度分析。"}
+            <div className="min-w-0 flex-1">
+              <h1 className="font-serif text-[22px] font-black md:text-[24px]">
+                <span className="md:hidden">事件</span>
+                <span className="hidden md:inline">事件聚类 · 多源对比</span>
+              </h1>
+              <p className="mt-1 max-w-2xl text-[12.5px] leading-6 text-[#6d6450] md:text-[13px]">
+                <span className="md:hidden">多源报道自动聚合，点开可对比立场与脉络。{p.llmReady ? "大模型已接入。" : ""}</span>
+                <span className="hidden md:inline">
+                  系统按标题相似度、关键词重叠与时间窗，把<b>不同来源对同一事件</b>的报道自动聚合；点开任一事件即可对比各方的
+                  <b>共识事实、叙述框架、态度立场与信息取舍</b>。{p.llmReady ? "大模型已接入，将进行深度语义对比。" : "未接入大模型时使用本地词法/立场词典算法，接入后升级为深度分析。"}
+                </span>
               </p>
             </div>
-            <button onClick={rebuild} disabled={rebuilding} className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-[#ddd3ba] bg-white px-3.5 py-2 text-[13px] font-medium transition hover:bg-[#faf5e8] disabled:opacity-60">
+            <button onClick={rebuild} disabled={rebuilding} className="inline-flex h-11 max-w-full items-center gap-1.5 rounded-lg border border-[#ddd3ba] bg-white px-3.5 text-[13px] font-medium transition hover:bg-[#faf5e8] disabled:opacity-60">
               {rebuilding ? <Spinner size={14} /> : <RefreshCw size={14} />}
-              <span className="truncate">{rebuilding ? (rebuildHint || "聚类中…") : "全局重新聚类"}</span>
+              <span className="truncate">{rebuilding ? (rebuildHint || "聚类中…") : "重新聚类"}</span>
             </button>
+          </div>
+
+          <div className="relative mt-4 max-w-xl">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#b3a682]" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="按事件标题 / 关键词模糊查找…"
+              className="w-full rounded-lg border border-[#ddd3ba] bg-white py-2 pl-8 pr-3 text-[13px] outline-none transition placeholder:text-[#bdb295] focus:border-[#e85a1e] focus:ring-2 focus:ring-[#e85a1e]/15"
+            />
           </div>
 
           {loading ? (
@@ -137,11 +169,13 @@ export default function EventsView(p: Props) {
           ) : clusters.length === 0 ? (
             <EmptyState
               icon={<Layers size={26} />}
-              title="暂时没有形成多源事件"
-              hint="当两个以上订阅源在相近时间报道同一事件时，会自动聚合到这里。试试「刷新全部」抓取更多来源，或调整设置中的聚类阈值后重新聚类。"
+              title={debouncedSearch ? "没有匹配的事件" : "暂时没有形成多源事件"}
+              hint={debouncedSearch
+                ? "试试换个关键词，或清空搜索查看全部事件。"
+                : "当两个以上订阅源在相近时间报道同一事件时，会自动聚合到这里。试试「刷新全部」抓取更多来源，或调整设置中的聚类阈值后重新聚类。"}
             />
           ) : (
-            <div className="mt-5 grid gap-3.5 md:grid-cols-2">
+            <div className="mt-5 grid grid-cols-1 gap-3.5 md:grid-cols-2">
               {clusters.map((c, i) => {
                 const spread = c.stanceSpread || 0;
                 return (
@@ -152,7 +186,14 @@ export default function EventsView(p: Props) {
                     style={{ padding: 18, animationDelay: `${i * 45}ms` }}
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <h3 className="font-serif text-[16.5px] font-bold leading-snug group-hover:text-[#c24a12]">{c.title}</h3>
+                      {debouncedSearch ? (
+                        <h3
+                          className="font-serif text-[16.5px] font-bold leading-snug group-hover:text-[#c24a12] [&_mark]:rounded-sm [&_mark]:bg-[#ffe0c2] [&_mark]:px-0.5"
+                          dangerouslySetInnerHTML={{ __html: highlightTitle(c.title, debouncedSearch) }}
+                        />
+                      ) : (
+                        <h3 className="font-serif text-[16.5px] font-bold leading-snug group-hover:text-[#c24a12]">{c.title}</h3>
+                      )}
                       <ChevronRight size={16} className="mt-1 shrink-0 text-[#c9bc97] transition group-hover:translate-x-0.5 group-hover:text-[#e85a1e]" />
                     </div>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -210,9 +251,13 @@ export default function EventsView(p: Props) {
   const comp = detail?.cluster.comparison || null;
   return (
     <section className="min-w-0 flex-1 overflow-y-auto bg-[#f6f3ec]">
-      <div className="mx-auto max-w-5xl px-6 py-6">
-        <button onClick={() => setDetailId(null)} className="mb-4 inline-flex items-center gap-1.5 text-[13px] font-medium text-[#6d6450] transition hover:text-[#e85a1e]">
-          <ArrowLeft size={15} /> 返回事件列表
+      <div className="mx-auto max-w-5xl px-4 py-5 md:px-6 md:py-6">
+        <button
+          type="button"
+          onClick={() => setDetailId(null)}
+          className="mb-4 inline-flex h-11 min-w-[44px] items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-[#6d6450] transition hover:bg-[#efe8d8] hover:text-[#e85a1e]"
+        >
+          <ArrowLeft size={16} /> 返回事件列表
         </button>
 
         {detailLoading || !detail ? (
@@ -243,9 +288,14 @@ export default function EventsView(p: Props) {
             </div>
 
             {comparing && (
-              <div className="anim-fadeIn mt-6 flex items-center gap-3 rounded-2xl border border-[#f0dcc4] bg-[#fff7ea] px-5 py-4 text-[13.5px] text-[#8a5a1d]">
-                <Spinner size={17} />
-                正在逐篇研读 {detail.members.length} 个来源，抽取共识事实、比对叙述框架与态度倾向…{p.llmReady ? "大模型分析可能需要 10–40 秒" : ""}
+              <div className="anim-fadeIn mt-6 w-full rounded-2xl border border-[#f0dcc4] bg-[#fff7ea] px-5 py-4 text-[13.5px] text-[#8a5a1d]">
+                <div className="flex items-center gap-3">
+                  <Spinner size={17} />
+                  <span>正在逐篇研读 {detail.members.length} 个来源，抽取共识事实、比对叙述框架与态度倾向…{p.llmReady ? "大模型分析可能需要 10–40 秒" : ""}</span>
+                </div>
+                <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-[#f0dcc4]">
+                  <div className="h-full w-2/3 animate-pulse rounded-full bg-[#e85a1e]/70" />
+                </div>
               </div>
             )}
 
@@ -260,7 +310,7 @@ export default function EventsView(p: Props) {
                 {/* stance spectrum */}
                 <div className="anim-fadeUp rounded-2xl border border-[#e3dccb] bg-[#fffdf8] p-5" style={{ animationDelay: "60ms" }}>
                   <div className="mb-1 flex items-center gap-2 text-[13px] font-bold text-[#4c4433]"><Scale size={15} className="text-[#e85a1e]" /> 态度立场光谱</div>
-                  <p className="mb-4 text-[11.5px] text-[#9a917c]">越靠左越倾向批评/质疑，越靠右越倾向支持/肯定，中间为中立陈述</p>
+                  <p className="mb-4 text-[11.5px] text-[#9a917c]">标签：中立 / 客观 / 主观 / 积极 / 消极；光谱越左越消极质疑，越右越积极支持</p>
                   <div className="relative mx-3">
                     <div className="h-2 rounded-full bg-gradient-to-r from-[#c0392b] via-[#e5ddc8] to-[#4c7a57]" />
                     <span className="absolute left-1/2 top-0 h-2 w-px bg-white/70" />
@@ -283,12 +333,79 @@ export default function EventsView(p: Props) {
                           <SourceAvatar title={s.feedTitle} color={member?.feedColor || "#888"} size={15} />
                           {s.feedTitle}
                           <b style={{ color: stanceColor(s.stanceScore) }}>{s.stanceScore > 0 ? "+" : ""}{s.stanceScore.toFixed(2)}</b>
-                          <span className="text-[#9a917c]">{s.stanceLabel}</span>
+                          <span className="text-[#9a917c]">{s.attitude?.label || s.stanceLabel}</span>
+                          {s.attitude && (
+                            <span className="text-[10.5px] text-[#b0a78f]">客{s.attitude.objectivity.toFixed(2)}</span>
+                          )}
                         </span>
                       );
                     })}
                   </div>
                 </div>
+
+                {comp.countryOrActorAttitudes && comp.countryOrActorAttitudes.length > 0 && (
+                  <div className="anim-fadeUp rounded-2xl border border-[#e3dccb] bg-[#fffdf8] p-5">
+                    <div className="mb-3 flex items-center gap-2 text-[13px] font-bold text-[#4c4433]">
+                      <Scale size={15} className="text-[#e85a1e]" /> 国家 / 行为体立场
+                    </div>
+                    <p className="mb-4 text-[11.5px] text-[#9a917c]">含立场概述与「为什么」——利益、盟友、国内舆论与历史先例；外搜补充会单独标注</p>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {comp.countryOrActorAttitudes.map((a) => {
+                        const open = Boolean(whyOpen[a.actor]);
+                        const hasWhy = Boolean(a.rationale || a.drivers?.length);
+                        return (
+                        <article key={a.actor} className="rounded-xl border border-[#e3dccb] bg-white p-4">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <b className="text-[14px] text-[#2a2519]">{a.actor}</b>
+                            <Badge color={stanceColor(a.score)}>{a.attitude}</Badge>
+                            <span className="text-[12px] text-[#9a917c]">{a.score > 0 ? "+" : ""}{a.score.toFixed(2)}</span>
+                            {a.supplementNote && (
+                              <span className="rounded-md bg-[#f0e9d6] px-1.5 py-0.5 text-[10.5px] text-[#8a5a1d]">分析补充</span>
+                            )}
+                          </div>
+                          {(a.summary || a.evidenceSpan) && (
+                            <p className="mt-2 text-[13px] leading-[1.75] text-[#4c4433]">{a.summary || a.evidenceSpan}</p>
+                          )}
+                          {hasWhy && (
+                            <button
+                              type="button"
+                              onClick={() => setWhyOpen((prev) => ({ ...prev, [a.actor]: !prev[a.actor] }))}
+                              className="mt-2.5 text-[11.5px] font-semibold text-[#e85a1e]"
+                            >
+                              {open ? "收起「为什么」" : "展开「为什么」"}
+                            </button>
+                          )}
+                          {open && a.rationale && (
+                            <div className="mt-2">
+                              <div className="text-[11.5px] font-semibold text-[#8a5a1d]">为什么是这样的态度</div>
+                              <p className="mt-0.5 text-[12.5px] leading-[1.75] text-[#57503f]">{a.rationale}</p>
+                            </div>
+                          )}
+                          {open && !!a.drivers?.length && (
+                            <ul className="mt-2 space-y-1">
+                              {a.drivers.map((d, i) => (
+                                <li key={i} className="flex gap-1.5 text-[12px] leading-[1.65] text-[#57503f]">
+                                  <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-[#e85a1e]" />{d}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          {!!a.evidenceQuotes?.length && (
+                            <div className="mt-2 space-y-1 border-t border-[#efe8d8] pt-2">
+                              {a.evidenceQuotes.map((q, i) => (
+                                <p key={i} className="text-[11.5px] italic leading-[1.6] text-[#9a917c]">「{q}」</p>
+                              ))}
+                            </div>
+                          )}
+                          {a.supplementNote && (
+                            <p className="mt-2 text-[11px] text-[#b0a78f]">{a.supplementNote}</p>
+                          )}
+                        </article>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* consensus vs divergences */}
                 <div className="grid gap-4 lg:grid-cols-2">
@@ -322,7 +439,7 @@ export default function EventsView(p: Props) {
                 {/* per-source cards */}
                 <div>
                   <div className="mb-3 flex items-center gap-2 text-[14px] font-bold"><Quote size={15} className="text-[#e85a1e]" /> 逐来源拆解：叙述框架 · 语气 · 信息取舍</div>
-                  <div className="grid gap-3.5 md:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
                     {comp.sources.map((s, idx) => {
                       const member = detail.members.find((m) => m.id === s.articleId);
                       return (
@@ -330,7 +447,7 @@ export default function EventsView(p: Props) {
                           <div className="flex items-center gap-2">
                             <SourceAvatar title={s.feedTitle} color={member?.feedColor || "#888"} size={22} />
                             <span className="text-[13.5px] font-bold">{s.feedTitle}</span>
-                            <Badge color={stanceColor(s.stanceScore)}>{s.stanceLabel} {s.stanceScore > 0 ? "+" : ""}{s.stanceScore.toFixed(2)}</Badge>
+                            <Badge color={stanceColor(s.stanceScore)}>{s.attitude?.label || s.stanceLabel} {s.stanceScore > 0 ? "+" : ""}{s.stanceScore.toFixed(2)}</Badge>
                             <button onClick={() => p.onOpenArticle(s.articleId)} className="ml-auto inline-flex items-center gap-1 text-[11.5px] font-medium text-[#e85a1e] hover:underline">
                               读原文 <ExternalLink size={11} />
                             </button>
@@ -374,13 +491,38 @@ export default function EventsView(p: Props) {
                 {/* timeline */}
                 {comp.timeline.length > 0 && (
                   <div className="anim-fadeUp rounded-2xl border border-[#e3dccb] bg-[#fffdf8] p-5">
-                    <div className="mb-4 flex items-center gap-2 text-[13px] font-bold text-[#4c4433]"><Clock3 size={15} className="text-[#e85a1e]" /> 事件时间线（按各源发布时间）</div>
-                    <div className="relative space-y-4 before:absolute before:bottom-1 before:left-[5px] before:top-1 before:w-px before:bg-[#e3dccb]">
+                    <div className="mb-4 flex items-center gap-2 text-[13px] font-bold text-[#4c4433]"><Clock3 size={15} className="text-[#e85a1e]" /> 事件脉络时间线</div>
+                    <div className="relative space-y-3 before:absolute before:bottom-1 before:left-[5px] before:top-1 before:w-px before:bg-[#e3dccb]">
                       {comp.timeline.map((t, i) => (
                         <div key={i} className="relative pl-6">
-                          <span className="absolute left-0 top-[5px] h-[11px] w-[11px] rounded-full border-2 border-[#e85a1e] bg-white" />
-                          <div className="text-[11px] font-semibold text-[#9a917c]">{t.time} · {t.source}</div>
-                          <div className="mt-0.5 text-[13.5px] leading-[1.7] text-[#2a2519]">{t.event}</div>
+                          <span className={`absolute left-0 top-[8px] h-[11px] w-[11px] rounded-full border-2 bg-white ${t.kind === "ai_supplement" ? "border-[#2b4a7f]" : "border-[#e85a1e]"}`} />
+                          <article className="rounded-xl border border-[#e3dccb] bg-white px-3.5 py-3">
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold text-[#9a917c]">
+                              <span>{t.timeNorm || t.time}</span>
+                              <span>·</span>
+                              <span>{t.source}</span>
+                              {t.kind === "ai_supplement" && (
+                                <span className="rounded-md bg-[#e8eef7] px-1.5 py-0.5 text-[10.5px] text-[#2b4a7f]">AI外搜补充</span>
+                              )}
+                              {t.confidence != null && t.confidence < 0.7 && (
+                                <span className="text-[#b0a78f]">· 待核</span>
+                              )}
+                            </div>
+                            <div className="mt-1 text-[13.5px] font-semibold leading-[1.65] text-[#2a2519]">{t.event}</div>
+                            {t.detail && (
+                              <p className="mt-1.5 text-[12.5px] leading-[1.75] text-[#57503f]">{t.detail}</p>
+                            )}
+                            {t.impact && (
+                              <p className="mt-1 text-[12px] leading-[1.7] text-[#8a5a1d]"><b>影响：</b>{t.impact}</p>
+                            )}
+                            {!!t.actors?.length && (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {t.actors.map((name) => (
+                                  <span key={name} className="rounded-md bg-[#f3eddd] px-1.5 py-0.5 text-[10.5px] text-[#6d6450]">{name}</span>
+                                ))}
+                              </div>
+                            )}
+                          </article>
                         </div>
                       ))}
                     </div>

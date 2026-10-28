@@ -63,6 +63,11 @@ export default function AiPanel({
       toast("请先在设置中配置并启用大模型", "error");
       return;
     }
+    const w = window as Window & { __confluxIsOnline?: () => boolean };
+    if (typeof w.__confluxIsOnline === "function" && !w.__confluxIsOnline()) {
+      toast("当前离线，无法调用大模型", "error");
+      return;
+    }
     setBusy(true);
     setStream("");
     let raw = "";
@@ -123,8 +128,8 @@ export default function AiPanel({
   })();
 
   return (
-    <div className="anim-fadeUp mt-5 overflow-hidden rounded-xl border border-[#f0dcc4] bg-gradient-to-br from-[#fff7ea] to-[#fdf1de]" style={{ animationDelay: "90ms" }}>
-      <div className="flex items-center gap-2 border-b border-[#f0dcc4]/70 px-4 py-2.5">
+    <div className="anim-fadeUp mt-5 overflow-hidden rounded-xl border border-[#f0dcc4] bg-gradient-to-br from-[#fff7ea] to-[#fdf1de] max-md:mt-4" style={{ animationDelay: "90ms" }}>
+      <div className="flex items-center gap-2 border-b border-[#f0dcc4]/70 px-4 py-2.5 max-md:px-3">
         <Sparkles size={14} className="text-[#e85a1e]" />
         <span className="text-[13px] font-bold text-[#8a5a1d]">大模型深度解读</span>
         <span className="ml-auto" />
@@ -139,7 +144,7 @@ export default function AiPanel({
       </div>
 
       {open && (
-        <div className="space-y-3 px-4 py-3">
+        <div className="space-y-3 px-4 py-3 max-md:space-y-2.5 max-md:px-3 max-md:py-2.5 max-md:text-[13px]">
           {!data && !busy && (
             <div className="flex flex-wrap items-center gap-3">
               <button
@@ -177,6 +182,24 @@ export default function AiPanel({
                 </div>
               )}
               {data.summary && <p className="text-[14px] leading-[1.8] text-[#4c4433]">{data.summary}</p>}
+
+              {data.background && (
+                <Sec title="背景">
+                  <p className="text-[13px] leading-[1.75] text-[#57503f] max-md:text-[12.5px] max-md:leading-[1.7]">{data.background}</p>
+                </Sec>
+              )}
+
+              {data.whatHappened && (
+                <Sec title="经过">
+                  <p className="text-[13px] leading-[1.75] text-[#57503f] max-md:text-[12.5px] max-md:leading-[1.7]">{data.whatHappened}</p>
+                </Sec>
+              )}
+
+              {data.implications && (
+                <Sec title="影响与后续">
+                  <p className="text-[13px] leading-[1.75] text-[#57503f] max-md:text-[12.5px] max-md:leading-[1.7]">{data.implications}</p>
+                </Sec>
+              )}
 
               {!!data.bullets?.length && (
                 <Sec title="核心要点">
@@ -289,10 +312,14 @@ export default function AiPanel({
 
           <div className="flex gap-2">
             <input
-              className="min-w-0 flex-1 rounded-lg border border-[#e3dccb] bg-white px-3 py-2 text-[13px] outline-none focus:border-[#e85a1e]"
+              className="min-h-[44px] min-w-0 flex-1 rounded-lg border border-[#e3dccb] bg-white px-3 py-2 text-[13px] outline-none focus:border-[#e85a1e]"
               placeholder="就这篇文章提问，例如：作者的论据站得住吗？"
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
+              onFocus={(e) => {
+                const el = e.currentTarget;
+                window.setTimeout(() => el.scrollIntoView({ block: "center", behavior: "smooth" }), 120);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") ask();
               }}
@@ -301,7 +328,7 @@ export default function AiPanel({
               type="button"
               onClick={() => ask()}
               disabled={asking}
-              className="inline-flex items-center justify-center rounded-lg bg-[#e85a1e] px-3 text-white hover:bg-[#d14e18] disabled:opacity-50"
+              className="inline-flex h-11 min-w-[44px] items-center justify-center rounded-lg bg-[#e85a1e] px-3 text-white hover:bg-[#d14e18] disabled:opacity-50"
             >
               <Send size={14} />
             </button>

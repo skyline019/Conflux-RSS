@@ -4,7 +4,7 @@ import {
   Star, Archive, ExternalLink, Sparkles, FileText, Trash2, Check, FolderPlus,
   Layers, Copy, ChevronDown, BookOpen, Clock3, Hash, Undo2, PlayCircle, Tv,
   Images, ZoomIn, ZoomOut, RotateCcw, ChevronLeft, ChevronRight, X, Sun, Moon,
-  PictureInPicture2, Volume2, Link2, Type, Share2,
+  PictureInPicture2, Volume2, Link2, Type, Share2, MoreHorizontal,
 } from "lucide-react";
 import type { ArticleFull, CollectionRow, MediaItem } from "@/lib/client";
 import { api, fmtDateTime, timeAgo, DUP_REASON, FULLTEXT_LABEL, stanceColor, stanceLabel, proxiedImg } from "@/lib/client";
@@ -32,8 +32,11 @@ export default function Reader(p: Props) {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [showCollections, setShowCollections] = useState(false);
+  const [showMoreTools, setShowMoreTools] = useState(false);
   const [showDups, setShowDups] = useState(false);
-  const [fontScale, setFontScale] = useState<"sm" | "md" | "lg">("md");
+  const isMobileBoot =
+    typeof window !== "undefined" && Boolean((window as { __CONFLUX_MOBILE__?: boolean }).__CONFLUX_MOBILE__);
+  const [fontScale, setFontScale] = useState<"sm" | "md" | "lg">(isMobileBoot ? "lg" : "md");
 
   // Video & audio player state
   const [activeMediaIdx, setActiveMediaIdx] = useState(0);
@@ -430,7 +433,7 @@ export default function Reader(p: Props) {
     <button
       onClick={onClick}
       title={title || label}
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition hover:bg-[#f1ead9]"
+      className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition hover:bg-[#f1ead9] sm:h-auto sm:min-w-0"
       style={active ? { color: activeColor || "#e85a1e", background: `${activeColor || "#e85a1e"}14` } : { color: "#57503f" }}
     >
       {spinning ? <Spinner size={14} /> : icon}
@@ -440,10 +443,10 @@ export default function Reader(p: Props) {
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-[#fffdf8]">
-      {/* toolbar */}
-      <div className="flex items-center gap-0.5 overflow-x-auto border-b border-[#eee6d2] px-3 py-2">
+      {/* toolbar — sticky; primary actions + overflow「更多」on narrow */}
+      <div className="sticky top-0 z-20 flex items-center gap-0.5 border-b border-[#eee6d2] bg-[#fffdf8]/95 px-2 py-1.5 backdrop-blur-md sm:px-3 sm:py-2">
         {p.onBack && (
-          <button onClick={p.onBack} className="mr-1 inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#1b1812] px-2.5 py-1.5 text-[12.5px] font-medium text-white md:hidden">
+          <button onClick={p.onBack} className="mr-1 inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-lg bg-[#1b1812] px-2.5 py-1.5 text-[12.5px] font-medium text-white md:hidden">
             ← 列表
           </button>
         )}
@@ -454,123 +457,170 @@ export default function Reader(p: Props) {
           onClick={() => patch({ isStarred: !article.isStarred }, article.isStarred ? "已取消星标" : "已加星标")}
         />
         <ToolBtn
-          icon={<Archive size={15} />}
-          label={article.isArchived ? "取消归档" : "归档"}
-          active={article.isArchived} activeColor="#0e7490"
-          title="归档后从收件箱移出并在归档库永久保存全文"
-          onClick={() => patch({ isArchived: !article.isArchived }, article.isArchived ? "已取消归档" : "已归档，全文永久保存")}
-        />
-        <div className="relative">
-          <ToolBtn icon={<FolderPlus size={15} />} label="入集" onClick={() => setShowCollections(!showCollections)} />
-          {showCollections && (
-            <>
-              <div className="fixed inset-0 z-10" onClick={() => setShowCollections(false)} />
-              <div className="anim-fadeUp absolute left-0 top-9 z-20 w-56 rounded-xl border border-[#e3dccb] bg-white p-1.5 shadow-xl">
-                <div className="px-2 pb-1 pt-1.5 text-[11px] font-semibold text-[#9a917c]">归档到合集（可多选）</div>
-                {p.collections.length === 0 && <div className="px-2 py-2 text-[12px] text-[#9a917c]">暂无合集，去归档库新建</div>}
-                {p.collections.map((c) => {
-                  const inCol = article.collectionIds.includes(c.id);
-                  return (
-                    <button key={c.id} onClick={() => toggleCollection(c.id)} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] hover:bg-[#faf5e8]">
-                      <span className="h-2.5 w-2.5 rounded-[4px]" style={{ background: c.color }} />
-                      <span className="flex-1">{c.name}</span>
-                      {inCol && <Check size={13} className="text-[#4c7a57]" />}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
-        <span className="mx-1 h-4 w-px bg-[#e3dccb]" />
-        <ToolBtn
-          icon={<FileText size={15} />}
-          label={article.fullTextStatus === "success" ? "重抓原文" : "穿透抓全文"}
-          spinning={busy === "fulltext"}
-          title="自动追踪跳转链接（如百度热搜/Google新闻）并深入提取原文全文与配图"
-          onClick={fetchFullText}
-        />
-        <ToolBtn
           icon={<Sparkles size={15} />}
           label={article.aiSummary ? "重新总结" : p.llmReady ? "AI 总结" : "生成摘要"}
           onClick={summarize}
           title={p.llmReady ? "流式生成结构化摘要" : "未配置大模型时使用本地抽取式摘要"}
         />
-        <ToolBtn
-          icon={<Tv size={15} />}
-          label={mediaList.length > 0 ? `音视频 (${mediaList.length})` : "视频解析"}
-          active={showMediaParser || mediaList.length > 0}
-          activeColor="#e11d48"
-          title="打开内嵌音视频播放器或粘贴外部视频链接解析播放"
-          onClick={() => setShowMediaParser((v) => !v)}
-        />
-        {galleryImages.length > 0 && (
+        {(isMobile || typeof navigator !== "undefined" && "share" in navigator) && (
           <ToolBtn
-            icon={<Images size={15} />}
-            label={`图集 (${galleryImages.length})`}
-            title="打开本文高清图片灯箱画廊"
-            onClick={() => { setZoom(1); setLightboxIdx(0); }}
+            icon={<Share2 size={15} />}
+            label="分享"
+            title="分享文章"
+            onClick={async () => {
+              const url = article.resolvedLink || article.link;
+              const tldr = (article.aiJson as { tldr?: string } | null)?.tldr || article.aiSummary || "";
+              const text = `${article.title}${tldr ? `\n${tldr}` : ""}`;
+              try {
+                if (isMobile) {
+                  window.dispatchEvent(new CustomEvent("confluxShareOut", { detail: { title: article.title, text, url } }));
+                  return;
+                }
+                await navigator.share({ title: article.title, text, url });
+              } catch {
+                toast("分享已取消或不可用", "info");
+              }
+            }}
           />
         )}
+        <button
+          type="button"
+          onClick={() => {
+            const href = article.resolvedLink || article.link;
+            if (isMobile) {
+              window.dispatchEvent(new CustomEvent("confluxOpenUrl", { detail: href }));
+              return;
+            }
+            window.open(href, "_blank", "noopener,noreferrer");
+          }}
+          className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium text-[#57503f] transition hover:bg-[#f1ead9]"
+          title="打开原文"
+        >
+          <ExternalLink size={15} /><span className="hidden sm:inline">原文</span>
+        </button>
 
-        <div className="ml-auto flex items-center gap-0.5">
-          <ToolBtn
-            icon={<Type size={15} />}
-            label={fontScale === "sm" ? "小字" : fontScale === "lg" ? "大字" : "字号"}
-            title="切换阅读器正文字号（小 / 标准 / 大）"
-            onClick={() => setFontScale((s) => (s === "md" ? "lg" : s === "lg" ? "sm" : "md"))}
-          />
-          {p.onToggleDark && (
+        <div className="relative ml-auto flex items-center gap-0.5">
+          {/* desktop: show secondary inline */}
+          <div className="hidden items-center gap-0.5 md:flex">
             <ToolBtn
-              icon={p.darkMode ? <Sun size={15} /> : <Moon size={15} />}
-              label={p.darkMode ? "日间" : "夜间"}
-              title="切换日间 / 夜间模式"
-              onClick={p.onToggleDark}
+              icon={<Archive size={15} />}
+              label={article.isArchived ? "取消归档" : "归档"}
+              active={article.isArchived} activeColor="#0e7490"
+              onClick={() => patch({ isArchived: !article.isArchived }, article.isArchived ? "已取消归档" : "已归档，全文永久保存")}
             />
-          )}
-          <ToolBtn icon={<Undo2 size={15} />} label="标未读" onClick={() => patch({ isRead: false }, "已标为未读")} />
-          {(isMobile || typeof navigator !== "undefined" && "share" in navigator) && (
+            <div className="relative">
+              <ToolBtn icon={<FolderPlus size={15} />} label="入集" onClick={() => setShowCollections(!showCollections)} />
+              {showCollections && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setShowCollections(false)} />
+                  <div className="anim-fadeUp absolute right-0 top-12 z-20 w-56 rounded-xl border border-[#e3dccb] bg-white p-1.5 shadow-xl">
+                    <div className="px-2 pb-1 pt-1.5 text-[11px] font-semibold text-[#9a917c]">归档到合集（可多选）</div>
+                    {p.collections.length === 0 && <div className="px-2 py-2 text-[12px] text-[#9a917c]">暂无合集，去归档库新建</div>}
+                    {p.collections.map((c) => {
+                      const inCol = article.collectionIds.includes(c.id);
+                      return (
+                        <button key={c.id} onClick={() => toggleCollection(c.id)} className="flex min-h-[40px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] hover:bg-[#faf5e8]">
+                          <span className="h-2.5 w-2.5 rounded-[4px]" style={{ background: c.color }} />
+                          <span className="flex-1">{c.name}</span>
+                          {inCol && <Check size={13} className="text-[#4c7a57]" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
             <ToolBtn
-              icon={<Share2 size={15} />}
-              label="分享"
-              title="分享文章"
-              onClick={async () => {
-                const url = article.resolvedLink || article.link;
-                const tldr = (article.aiJson as { tldr?: string } | null)?.tldr || article.aiSummary || "";
-                const text = `${article.title}${tldr ? `\n${tldr}` : ""}`;
-                try {
-                  if (isMobile) {
-                    window.dispatchEvent(new CustomEvent("confluxShareOut", { detail: { title: article.title, text, url } }));
-                    return;
-                  }
-                  await navigator.share({ title: article.title, text, url });
-                } catch {
-                  toast("分享已取消或不可用", "info");
-                }
-              }}
+              icon={<FileText size={15} />}
+              label={article.fullTextStatus === "success" ? "重抓原文" : "穿透抓全文"}
+              spinning={busy === "fulltext"}
+              onClick={fetchFullText}
             />
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              const href = article.resolvedLink || article.link;
-              if (isMobile) {
-                window.dispatchEvent(new CustomEvent("confluxOpenUrl", { detail: href }));
-                return;
-              }
-              window.open(href, "_blank", "noopener,noreferrer");
-            }}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium text-[#57503f] transition hover:bg-[#f1ead9]"
-          >
-            <ExternalLink size={15} /><span className="hidden sm:inline">原文</span>
-          </button>
-          <ToolBtn icon={<Trash2 size={15} />} label="删除" onClick={remove} />
+            <ToolBtn
+              icon={<Tv size={15} />}
+              label={mediaList.length > 0 ? `音视频 (${mediaList.length})` : "视频解析"}
+              active={showMediaParser || mediaList.length > 0}
+              activeColor="#e11d48"
+              onClick={() => setShowMediaParser((v) => !v)}
+            />
+            {galleryImages.length > 0 && (
+              <ToolBtn icon={<Images size={15} />} label={`图集 (${galleryImages.length})`} onClick={() => { setZoom(1); setLightboxIdx(0); }} />
+            )}
+            <ToolBtn
+              icon={<Type size={15} />}
+              label={fontScale === "sm" ? "小字" : fontScale === "lg" ? "大字" : "字号"}
+              onClick={() => setFontScale((s) => (s === "md" ? "lg" : s === "lg" ? "sm" : "md"))}
+            />
+            {p.onToggleDark && (
+              <ToolBtn icon={p.darkMode ? <Sun size={15} /> : <Moon size={15} />} label={p.darkMode ? "日间" : "夜间"} onClick={p.onToggleDark} />
+            )}
+            <ToolBtn icon={<Undo2 size={15} />} label="标未读" onClick={() => patch({ isRead: false }, "已标为未读")} />
+            <ToolBtn icon={<Trash2 size={15} />} label="删除" onClick={remove} />
+          </div>
+
+          {/* mobile: overflow menu */}
+          <div className="relative md:hidden">
+            <button
+              type="button"
+              onClick={() => { setShowMoreTools((v) => !v); setShowCollections(false); }}
+              className="inline-flex h-11 min-w-[44px] items-center justify-center rounded-lg text-[#57503f] hover:bg-[#f1ead9]"
+              aria-label="更多操作"
+            >
+              <MoreHorizontal size={18} />
+            </button>
+            {showMoreTools && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setShowMoreTools(false)} />
+                <div className="anim-fadeUp absolute right-0 top-12 z-20 w-52 rounded-xl border border-[#e3dccb] bg-white py-1.5 shadow-xl">
+                  {[
+                    { label: article.isArchived ? "取消归档" : "归档", run: () => patch({ isArchived: !article.isArchived }, article.isArchived ? "已取消归档" : "已归档，全文永久保存") },
+                    { label: "入集", run: () => { setShowMoreTools(false); setShowCollections(true); } },
+                    { label: article.fullTextStatus === "success" ? "重抓全文" : "穿透抓全文", run: () => { setShowMoreTools(false); void fetchFullText(); } },
+                    { label: mediaList.length > 0 ? `音视频 (${mediaList.length})` : "视频解析", run: () => { setShowMoreTools(false); setShowMediaParser((v) => !v); } },
+                    ...(galleryImages.length > 0 ? [{ label: `图集 (${galleryImages.length})`, run: () => { setShowMoreTools(false); setZoom(1); setLightboxIdx(0); } }] : []),
+                    { label: fontScale === "sm" ? "字号：小" : fontScale === "lg" ? "字号：大" : "字号：标准", run: () => setFontScale((s) => (s === "md" ? "lg" : s === "lg" ? "sm" : "md")) },
+                    ...(p.onToggleDark ? [{ label: p.darkMode ? "日间模式" : "夜间模式", run: () => p.onToggleDark?.() }] : []),
+                    { label: "标为未读", run: () => { setShowMoreTools(false); void patch({ isRead: false }, "已标为未读"); } },
+                    { label: "删除", run: () => { setShowMoreTools(false); void remove(); } },
+                  ].map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => item.run()}
+                      className="flex min-h-[44px] w-full items-center px-3 text-left text-[13px] text-[#4c4433] hover:bg-[#faf5e8]"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+            {showCollections && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setShowCollections(false)} />
+                <div className="anim-fadeUp absolute right-0 top-12 z-20 w-56 rounded-xl border border-[#e3dccb] bg-white p-1.5 shadow-xl">
+                  <div className="px-2 pb-1 pt-1.5 text-[11px] font-semibold text-[#9a917c]">归档到合集</div>
+                  {p.collections.length === 0 && <div className="px-2 py-2 text-[12px] text-[#9a917c]">暂无合集</div>}
+                  {p.collections.map((c) => {
+                    const inCol = article.collectionIds.includes(c.id);
+                    return (
+                      <button key={c.id} onClick={() => toggleCollection(c.id)} className="flex min-h-[44px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] hover:bg-[#faf5e8]">
+                        <span className="h-2.5 w-2.5 rounded-[4px]" style={{ background: c.color }} />
+                        <span className="flex-1">{c.name}</span>
+                        {inCol && <Check size={13} className="text-[#4c7a57]" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
       {/* content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto overscroll-y-contain">
-        <div className="mx-auto max-w-[740px] px-6 pb-20 pt-7 pt-[max(1.75rem,env(safe-area-inset-top))] md:pt-7">
+        <div className="mx-auto max-w-[740px] px-5 pb-24 pt-6 md:px-6 md:pb-20 md:pt-7">
           <div className="anim-fadeUp">
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-[#9a917c]">
               <SourceAvatar title={article.feedTitle} color={article.feedColor} size={20} />
@@ -581,7 +631,7 @@ export default function Reader(p: Props) {
                 <Clock3 size={12} /> {fmtDateTime(article.publishedAt)}（{timeAgo(article.publishedAt || article.createdAt)}）
               </span>
             </div>
-            <h1 className="mt-3 font-serif text-[27px] font-black leading-[1.45] text-[#1b1812]">{article.title}</h1>
+            <h1 className="mt-3 font-serif text-[24px] font-black leading-[1.45] text-[#1b1812] md:text-[27px]">{article.title}</h1>
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <Badge color={ft.color}>{busy === "fulltext" ? "正在穿透抓取原文…" : ft.text}</Badge>
               {resolvedDiffers && (
@@ -727,7 +777,7 @@ export default function Reader(p: Props) {
                         controls
                         playsInline
                         preload="metadata"
-                        className="aspect-video w-full rounded-xl bg-black"
+                        className="aspect-video w-full touch-pan-y rounded-xl bg-black"
                         onError={() => {
                           if (isHlsUrl(currentMedia.url)) return; // hls.js owns errors
                           if (!mediaUseDirect) {
@@ -913,7 +963,7 @@ export default function Reader(p: Props) {
           <div className="anim-fadeUp mt-6" style={{ animationDelay: "130ms" }} onClick={onReaderBodyClick}>
             {article.contentHtml ? (
               <div
-                className="reader-body"
+                className="reader-body touch-pan-y overscroll-x-contain"
                 data-script={
                   /^[A-Za-z0-9“"«]/.test(
                     (readerHtml || "").replace(/<[^>]+>/g, "").replace(/&[a-z]+;/gi, " ").trim(),
@@ -925,7 +975,7 @@ export default function Reader(p: Props) {
                 dangerouslySetInnerHTML={{ __html: readerHtml }}
               />
             ) : (
-              <div className="reader-body" style={fontSizeStyle}>
+              <div className="reader-body touch-pan-y overscroll-x-contain" style={fontSizeStyle}>
                 {article.imageUrl && (
                   <figure>
                     {/* eslint-disable-next-line @next/next/no-img-element */}

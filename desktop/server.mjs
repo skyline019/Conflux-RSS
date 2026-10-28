@@ -10,6 +10,8 @@ import { CATALOG } from "./catalog.mjs";
 import { countWords, extractArticle } from "./fulltext.mjs";
 import { pickRssImage, prependMissingVideos, rewriteDocument, rssVideoUrls, videoEmbed } from "./media.mjs";
 import { discoverFeeds } from "./discover.mjs";
+import { buildFtsMatchExpression, buildSearchDocument, escapeLike, parseSearchQuery } from "./articleSearch.mjs";
+import { rankClustersByQuery, scoreQueryToTitle, expandArticleHitsWithClusters } from "./eventSearch.mjs";
 
 const HOME = process.env.CONFLUX_HOME || path.join(import.meta.dirname, "data");
 const PORT = Number(process.env.CONFLUX_PORT || 3217);
@@ -149,6 +151,35 @@ if (columns("articles").has("summary")) {
   db.exec("update articles set rss_summary = summary where rss_summary is null and summary is not null");
 }
 
+try {
+  db.exec(`create virtual table if not exists articles_fts using fts5(doc, tokenize = 'unicode61')`);
+} catch { /* FTS5 unavailable */ }
+
+function refreshArticleFts(articleId) {
+  try {
+    const row = db.prepare(`
+      select a.title, a.author, a.rss_summary as rssSummary, a.content, a.ai_summary as aiSummary, a.keywords,
+        f.title as feedTitle
+      from articles a join feeds f on f.id = a.feed_id where a.id = ?
+    `).get(articleId);
+    if (!row) {
+      db.prepare("delete from articles_fts where rowid = ?").run(articleId);
+      return;
+    }
+    const doc = buildSearchDocument(row);
+    db.prepare("delete from articles_fts where rowid = ?").run(articleId);
+    db.prepare("insert into articles_fts(rowid, doc) values(?, ?)").run(articleId, doc);
+  } catch { /* ignore */ }
+}
+
+function rebuildAllArticleFts() {
+  try {
+    db.exec("delete from articles_fts");
+    for (const row of db.prepare("select id from articles").all()) refreshArticleFts(row.id);
+  } catch { /* ignore */ }
+}
+rebuildAllArticleFts();
+
 const DEFAULT_SETTINGS = {
   llmEnabled: false, llmProvider: "deepseek", llmBaseUrl: "https://api.deepseek.com/v1", llmApiKey: "", llmModel: "deepseek-chat",
   autoFullText: true, fullTextPerFeedLimit: 5, autoSummary: false,
@@ -210,7 +241,13 @@ function extractiveSummary(text) {
 }
 
 function maskSettings(s) {
-  return { ...s, llmApiKey: "", llmApiKeyMasked: s.llmApiKey ? `••••••••${s.llmApiKey.slice(-4)}` : "", hasApiKey: Boolean(s.llmApiKey), proxyInUse: s.proxyEnabled ? s.proxyUrl : "" };
+  return {
+    ...s,
+    llmApiKey: "",
+    llmApiKeyMasked: s.llmApiKey ? `••••••••${s.llmApiKey.slice(-4)}` : "",
+    hasApiKey: Boolean(s.llmApiKey),
+    proxyInUse: s.proxyEnabled ? s.proxyUrl : "",
+  };
 }
 
 function loadProjectEnv() {
@@ -382,6 +419,7 @@ async function storeFullText(article) {
       images,
       article.id,
     );
+    refreshArticleFts(article.id);
     return { ok: true, wordCount: extracted.wordCount };
   } catch {
     markFullText.run("failed", article.id);
@@ -780,7 +818,9 @@ async function refreshFeed(feed) {
     );
     if (Number(result.changes) > 0) {
       added += 1;
-      if (status === "pending") fresh.push({ id: db.prepare("select id from articles where feed_id = ? and link = ?").get(feed.id, link).id, link, content: body, content_html: html ? String(html) : "" });
+      const newId = db.prepare("select id from articles where feed_id = ? and link = ?").get(feed.id, link).id;
+      refreshArticleFts(newId);
+      if (status === "pending") fresh.push({ id: newId, link, content: body, content_html: html ? String(html) : "" });
     } else duplicates += 1;
     if (matched) db.prepare("update rules set hit_count = hit_count + 1, last_hit_at = ? where id = ?").run(nowIso(), matched.id);
   }
@@ -914,6 +954,7 @@ function articleLite(row) {
     media: parseJsonList(row.media),
     author: row.author ?? null,
     rssSummary: row.rssSummary ?? null,
+    relatedViaCluster: Boolean(row.relatedViaCluster),
   };
 }
 
@@ -924,41 +965,134 @@ function listArticles(sp) {
   const search = (sp.get("search") || "").trim();
   const collectionId = Number(sp.get("collectionId")) || 0;
   const clusterId = Number(sp.get("clusterId")) || 0;
+  const related = search ? sp.get("related") !== "0" : false;
   const page = Math.max(1, Number(sp.get("page")) || 1);
   const pageSize = Math.min(100, Math.max(5, Number(sp.get("pageSize")) || 30));
-  const where = ["1 = 1"];
-  const args = [];
-  if (feedId) { where.push("a.feed_id = ?"); args.push(feedId); }
-  if (category) { where.push("f.category = ?"); args.push(category); }
-  if (clusterId) { where.push("a.cluster_id = ?"); args.push(clusterId); }
-  if (view === "inbox") where.push("a.is_archived = 0");
-  if (view === "unread") where.push("a.is_read = 0 and a.is_archived = 0");
-  if (view === "starred") where.push("a.is_starred = 1");
-  if (view === "archived") where.push("a.is_archived = 1");
-  if (view === "media") where.push("(a.video_url is not null and a.video_url != '' or (a.media is not null and a.media != '' and a.media != '[]'))");
-  if (collectionId) { where.push("a.id in (select article_id from article_collections where collection_id = ?)"); args.push(collectionId); }
-  if (search) {
-    where.push("(a.title like ? or a.content like ? or a.author like ? or f.title like ?)");
-    const like = `%${search}%`;
-    args.push(like, like, like, like);
-  }
-  const sqlWhere = where.join(" and ");
-  const total = db.prepare(`select count(*) as n from articles a join feeds f on f.id = a.feed_id where ${sqlWhere}`).get(...args).n;
-  const rows = db.prepare(`
-    select a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
+  const baseWhere = ["1 = 1"];
+  const baseArgs = [];
+  if (feedId) { baseWhere.push("a.feed_id = ?"); baseArgs.push(feedId); }
+  if (category) { baseWhere.push("f.category = ?"); baseArgs.push(category); }
+  if (clusterId) { baseWhere.push("a.cluster_id = ?"); baseArgs.push(clusterId); }
+  if (view === "inbox") baseWhere.push("a.is_archived = 0");
+  if (view === "unread") baseWhere.push("a.is_read = 0 and a.is_archived = 0");
+  if (view === "starred") baseWhere.push("a.is_starred = 1");
+  if (view === "archived") baseWhere.push("a.is_archived = 1");
+  if (view === "media") baseWhere.push("(a.video_url is not null and a.video_url != '' or (a.media is not null and a.media != '' and a.media != '[]'))");
+  if (collectionId) { baseWhere.push("a.id in (select article_id from article_collections where collection_id = ?)"); baseArgs.push(collectionId); }
+
+  const selectCols = `a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
       a.rss_summary as rssSummary, a.ai_summary as aiSummary, a.ai_source as aiSource,
       a.full_text_status as fullTextStatus, a.image_url as imageUrl, a.resolved_link as resolvedLink,
       a.video_url as videoUrl, a.images, a.media, a.word_count as wordCount, a.keywords,
       a.is_read as isRead, a.is_starred as isStarred, a.is_archived as isArchived, a.dup_count as dupCount,
       a.stance_score as stanceScore, a.published_at as publishedAt, a.fetched_at as fetchedAt, a.created_at as createdAt,
       f.title as feedTitle, f.color as feedColor, f.category as feedCategory,
-      substr(coalesce(a.content, a.rss_summary, ''), 1, 220) as excerpt
-    from articles a join feeds f on f.id = a.feed_id
-    where ${sqlWhere}
-    order by coalesce(a.published_at, a.created_at) desc
-    limit ? offset ?
-  `).all(...args, pageSize, (page - 1) * pageSize);
-  return { articles: rows.map(articleLite), total, page, pageSize };
+      substr(coalesce(a.content, a.rss_summary, a.ai_summary, ''), 1, 220) as excerpt`;
+
+  const fetchRows = (where, args, { fts = false, limit, offset } = {}) => {
+    const sqlWhere = where.join(" and ");
+    const fromSql = fts
+      ? "articles a join feeds f on f.id = a.feed_id join articles_fts fts on fts.rowid = a.id"
+      : "articles a join feeds f on f.id = a.feed_id";
+    const orderSql = fts
+      ? "order by bm25(fts), coalesce(a.published_at, a.created_at) desc"
+      : "order by coalesce(a.published_at, a.created_at) desc";
+    const total = db.prepare(`select count(*) as n from ${fromSql} where ${sqlWhere}`).get(...args).n;
+    const rows = db.prepare(`
+      select ${selectCols}
+      from ${fromSql}
+      where ${sqlWhere}
+      ${orderSql}
+      limit ? offset ?
+    `).all(...args, limit, offset);
+    return { rows, total };
+  };
+
+  const parsed = search ? parseSearchQuery(search) : null;
+  const likeWhere = [...baseWhere];
+  const likeArgs = [...baseArgs];
+  if (parsed?.terms?.length) {
+    for (const term of parsed.terms) {
+      const like = `%${escapeLike(term)}%`;
+      likeWhere.push(`(a.title like ? escape '\\' or ifnull(a.content,'') like ? escape '\\' or ifnull(a.author,'') like ? escape '\\' or f.title like ? escape '\\' or ifnull(a.rss_summary,'') like ? escape '\\' or ifnull(a.ai_summary,'') like ? escape '\\' or ifnull(a.keywords,'') like ? escape '\\')`);
+      likeArgs.push(like, like, like, like, like, like, like);
+    }
+  }
+
+  let searchWhere = baseWhere;
+  let searchArgs = baseArgs;
+  let useFts = false;
+  const matchExpr = parsed ? buildFtsMatchExpression(parsed) : null;
+  if (search && matchExpr) {
+    try {
+      searchWhere = [...baseWhere, "fts match ?"];
+      searchArgs = [...baseArgs, matchExpr];
+      const probe = fetchRows(searchWhere, searchArgs, { fts: true, limit: 1, offset: 0 });
+      if (probe.total > 0 || !parsed?.terms?.length) useFts = true;
+      else {
+        searchWhere = likeWhere;
+        searchArgs = likeArgs;
+      }
+    } catch {
+      searchWhere = likeWhere;
+      searchArgs = likeArgs;
+    }
+  } else if (search && parsed?.terms?.length) {
+    searchWhere = likeWhere;
+    searchArgs = likeArgs;
+  }
+
+  if (search && related && !clusterId) {
+    const windowSize = Math.min(80, Math.max(pageSize * 3, 40));
+    const { rows: hitRows } = fetchRows(searchWhere, searchArgs, { fts: useFts, limit: windowSize, offset: 0 });
+    const clusterIds = [...new Set(hitRows.map((r) => Number(r.clusterId)).filter((id) => id > 0))];
+    const membersByCluster = new Map();
+    if (clusterIds.length) {
+      const sibWhere = [...baseWhere, `a.cluster_id in (${clusterIds.map(() => "?").join(",")})`];
+      const siblings = db.prepare(`
+        select ${selectCols}
+        from articles a join feeds f on f.id = a.feed_id
+        where ${sibWhere.join(" and ")}
+        limit 200
+      `).all(...baseArgs, ...clusterIds);
+      for (const s of siblings) {
+        const cid = Number(s.clusterId);
+        if (!cid) continue;
+        const bag = membersByCluster.get(cid) || [];
+        bag.push(s);
+        membersByCluster.set(cid, bag);
+      }
+    }
+    const expanded = expandArticleHitsWithClusters(
+      search,
+      hitRows.map((h, i) => ({
+        ...h,
+        id: Number(h.id),
+        title: String(h.title || ""),
+        clusterId: h.clusterId == null ? null : Number(h.clusterId),
+        publishedAt: h.publishedAt || h.createdAt,
+        ftsHit: true,
+        ftsRank: i,
+      })),
+      membersByCluster,
+      { limit: 500 },
+    );
+    const total = expanded.length;
+    const pageSlice = expanded.slice((page - 1) * pageSize, page * pageSize);
+    return {
+      articles: pageSlice.map((r) => articleLite({ ...r, relatedViaCluster: r.relatedViaCluster })),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
+  const { rows, total } = fetchRows(searchWhere, searchArgs, {
+    fts: useFts,
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
+  });
+  return { articles: rows.map((r) => articleLite(r)), total, page, pageSize };
 }
 
 function articleFull(id) {
@@ -1253,8 +1387,21 @@ createServer(async (req, res) => {
       return json(res, 200, { cluster: clusterRow(row), members });
     }
     if (pathname === "/api/clusters" && req.method === "GET") {
-      const clusters = db.prepare("select * from clusters where article_count >= 2 order by last_seen_at desc limit 100").all().map(clusterRow);
-      return json(res, 200, { clusters });
+      const search = (url.searchParams.get("search") || "").trim();
+      const raw = db.prepare("select * from clusters where article_count >= 2 order by last_seen_at desc limit 100").all().map(clusterRow);
+      if (!search) return json(res, 200, { clusters: raw, total: raw.length });
+      const ranked = rankClustersByQuery(
+        search,
+        raw.map((c) => ({
+          ...c,
+          memberTitles: (c.members || []).map((m) => m.title),
+          lastSeenAt: c.lastSeenAt,
+        })),
+      );
+      return json(res, 200, {
+        clusters: ranked.map(({ memberTitles, ...rest }) => rest),
+        total: ranked.length,
+      });
     }
     if (pathname === "/api/stats" && req.method === "GET") {
       const totals = db.prepare(`
@@ -1293,6 +1440,55 @@ createServer(async (req, res) => {
       if (!body.llmApiKey && !body.clearApiKey) delete patch.llmApiKey;
       if (body.clearApiKey) patch.llmApiKey = "";
       return json(res, 200, { settings: maskSettings(saveSettings(patch)) });
+    }
+    if (pathname === "/api/search/aggregate" && req.method === "GET") {
+      const started = Date.now();
+      const q = (url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
+      const related = url.searchParams.get("related") !== "0";
+      const external = url.searchParams.get("external") !== "0";
+      if (!q) {
+        return json(res, 200, {
+          q: "", engine: "fts", library: [], clusters: [], external: [],
+          meta: { libraryTotal: 0, llmUsed: false, llmCacheHit: false, externalOk: false, tookMs: Date.now() - started },
+        });
+      }
+      const sp = new URLSearchParams(url.searchParams);
+      sp.set("search", q);
+      sp.set("related", related ? "1" : "0");
+      const listed = listArticles(sp);
+      let library = listed.articles.map((a, i) => {
+        const event = scoreQueryToTitle(q, a.title || "", a.keywords);
+        return { ...a, fuseScore: event, ftsRank: i };
+      });
+      library.sort((a, b) => (b.fuseScore || 0) - (a.fuseScore || 0));
+      library = library.filter((a) => (a.fuseScore || 0) >= 0.18 || a.relatedViaCluster || a.ftsRank < 5).slice(0, 60);
+      let clustersOut = [];
+      try {
+        const raw = db.prepare("select * from clusters where article_count >= 2 order by last_seen_at desc limit 80").all()
+          .map((row) => {
+            const members = db.prepare("select title from articles where cluster_id = ? order by coalesce(published_at, created_at) desc limit 8").all(row.id);
+            return {
+              id: Number(row.id),
+              title: String(row.title || ""),
+              keywords: row.keywords ? JSON.parse(row.keywords) : [],
+              lastSeenAt: row.last_seen_at,
+              memberTitles: members.map((m) => String(m.title || "")),
+            };
+          });
+        clustersOut = rankClustersByQuery(q, raw, { limit: 6 }).map((c) => ({
+          id: c.id, title: c.title, matchScore: c.matchScore,
+        }));
+      } catch { /* ignore */ }
+      let externalHits = [];
+      let externalOk = false;
+      if (external) {
+        externalOk = true;
+        externalHits = [];
+      }
+      return json(res, 200, {
+        q, engine: "fts", library, clusters: clustersOut, external: externalHits,
+        meta: { libraryTotal: library.length, llmUsed: false, llmCacheHit: false, externalOk, tookMs: Date.now() - started },
+      });
     }
     if (pathname === "/api/settings" && req.method === "POST") {
       const body = await readBody(req);

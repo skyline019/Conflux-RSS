@@ -48,6 +48,40 @@ export function isOnline() {
   return online;
 }
 
+export function isBgRefreshRunning() {
+  return bgRefreshRunning;
+}
+
+/** Sync Cap StatusBar with day/night theme (call from UI toggle). */
+export async function setStatusBarTheme(dark: boolean) {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    await StatusBar.setStyle({ style: dark ? Style.Light : Style.Dark });
+    await StatusBar.setBackgroundColor({ color: dark ? "#12100d" : "#f6f3ec" });
+  } catch { /* web / unsupported */ }
+}
+
+function publishOnlineFlag() {
+  const w = window as Window & {
+    __confluxIsOnline?: () => boolean;
+  };
+  w.__confluxIsOnline = () => online;
+  window.dispatchEvent(new CustomEvent("confluxOnline", { detail: { online } }));
+}
+
+function publishBgRefreshFlag() {
+  const w = window as Window & { __confluxBgRefreshRunning?: () => boolean };
+  w.__confluxBgRefreshRunning = () => bgRefreshRunning;
+  window.dispatchEvent(new CustomEvent("confluxBgRefresh", { detail: { running: bgRefreshRunning } }));
+}
+
+/** Expose theme helper for shared UI (no Capacitor import in Next bundle). */
+if (typeof window !== "undefined") {
+  (window as Window & { __confluxSetStatusBarTheme?: (dark: boolean) => void }).__confluxSetStatusBarTheme = (dark) => {
+    void setStatusBarTheme(dark);
+  };
+}
+
 export function setNativeHooks(next: NativeHooks) {
   hooks = { ...hooks, ...next };
 }
@@ -64,12 +98,14 @@ export async function initNativeShell() {
   }
 
   (window as Window & { __confluxIsOnline?: () => boolean }).__confluxIsOnline = () => online;
+  publishBgRefreshFlag();
   window.addEventListener("confluxHooksUpdated", syncHooksFromWindow);
   syncHooksFromWindow();
 
   try {
-    await StatusBar.setStyle({ style: Style.Dark });
-    await StatusBar.setBackgroundColor({ color: "#f6f3ec" });
+    const dark =
+      typeof document !== "undefined" && document.documentElement.classList.contains("dark");
+    await setStatusBarTheme(dark);
   } catch { /* web */ }
 
   try {
@@ -79,8 +115,15 @@ export async function initNativeShell() {
   try {
     const status = await Network.getStatus();
     online = status.connected;
-    Network.addListener("networkStatusChange", (s) => { online = s.connected; });
-  } catch { online = true; }
+    publishOnlineFlag();
+    Network.addListener("networkStatusChange", (s) => {
+      online = s.connected;
+      publishOnlineFlag();
+    });
+  } catch {
+    online = true;
+    publishOnlineFlag();
+  }
 
   App.addListener("backButton", ({ canGoBack }) => {
     syncHooksFromWindow();
@@ -135,6 +178,8 @@ export async function initNativeShell() {
       openExternal: typeof openExternal;
       isOnline: typeof isOnline;
       syncBackgroundSchedule: typeof syncBackgroundSchedule;
+      getNotifyPermission: typeof getNotifyPermission;
+      requestNotifyPermission: typeof requestNotifyPermission;
     };
   }).__confluxMobile = {
     getRefreshPrefs,
@@ -144,6 +189,8 @@ export async function initNativeShell() {
     openExternal,
     isOnline,
     syncBackgroundSchedule,
+    getNotifyPermission,
+    requestNotifyPermission,
   };
 
   window.addEventListener("confluxWriteFile", ((ev: CustomEvent<{ filename: string; text: string; mime?: string }>) => {
@@ -172,6 +219,7 @@ export async function syncBackgroundSchedule(intervalMinutes: number, wifiOnly: 
 export async function runBackgroundFeedRefresh() {
   if (bgRefreshRunning) return;
   bgRefreshRunning = true;
+  publishBgRefreshFlag();
   syncHooksFromWindow();
 
   try {
@@ -251,6 +299,7 @@ export async function runBackgroundFeedRefresh() {
     } catch { /* */ }
   } finally {
     bgRefreshRunning = false;
+    publishBgRefreshFlag();
   }
 }
 
@@ -282,6 +331,31 @@ async function ensureNotifyPermission() {
     const perm = await LocalNotifications.checkPermissions();
     if (perm.display !== "granted") await LocalNotifications.requestPermissions();
   } catch { /* ignore */ }
+}
+
+export async function getNotifyPermission(): Promise<"granted" | "denied" | "prompt" | "unknown"> {
+  try {
+    const perm = await LocalNotifications.checkPermissions();
+    const d = String(perm.display || "");
+    if (d === "granted") return "granted";
+    if (d === "denied") return "denied";
+    if (d === "prompt" || d === "prompt-with-rationale") return "prompt";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export async function requestNotifyPermission(): Promise<"granted" | "denied" | "prompt" | "unknown"> {
+  try {
+    const perm = await LocalNotifications.requestPermissions();
+    const d = String(perm.display || "");
+    if (d === "granted") return "granted";
+    if (d === "denied") return "denied";
+    return "prompt";
+  } catch {
+    return "unknown";
+  }
 }
 
 export async function getRefreshPrefs() {

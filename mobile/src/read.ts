@@ -1,5 +1,6 @@
 import { Readability } from "@mozilla/readability";
 import { parseMediaUrl, type MediaItem } from "@/lib/media";
+import { searchNewsCandidateUrls, decodeGoogleNewsUrlCached } from "@/lib/newsSearch";
 import { leadImage, pickRssImage, prependMissingVideos, rewriteDocument, rssVideoUrls } from "../../desktop/media.mjs";
 import { netText } from "./net";
 
@@ -80,57 +81,32 @@ function topicScore(expected: string, gotTitle: string, body: string) {
   return hit / uniq.length;
 }
 
-function rejectNewsUrl(u: string) {
-  return /baidu\.com\/s\?|top\.baidu|news\.google\.com|bing\.com|weibo\.com|zhihu\.com\/(question|people)/i.test(u);
-}
-
 async function searchNewsUrls(query: string): Promise<string[]> {
-  const q = query.replace(/[【】「」『』《》]/g, " ").trim();
-  if (q.length < 2) return [];
-  const found: { url: string; hint: string }[] = [];
-  const add = (url: string, hint: string) => {
-    const cleaned = url.replace(/&amp;/g, "&").trim();
-    if (!/^https?:\/\//i.test(cleaned) || rejectNewsUrl(cleaned)) return;
-    if (hint && topicScore(q, hint, "") < 0.18) return;
-    if (!found.some((item) => item.url === cleaned)) found.push({ url: cleaned, hint });
-  };
-  try {
-    const xml = await netText(
-      `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans`,
-      { headers: HEADERS },
-    );
-    for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
-      const block = m[1];
-      const title = block.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i)?.[1] || "";
-      const link = block.match(/<link>(https:\/\/news\.google\.com\/rss\/articles\/[^<]+)<\/link>/i)?.[1];
-      if (!link) continue;
+  return searchNewsCandidateUrls(query, {
+    userAgent: HEADERS["User-Agent"],
+    maxGoogleDecode: 6,
+    limit: 6,
+    fetchText: (url, opts) =>
+      netText(url, {
+        headers: { ...HEADERS, ...(opts?.headers || {}) },
+        method: opts?.method,
+        body: opts?.body,
+        timeoutMs: opts?.timeoutMs ?? 16000,
+      }),
+    decodeGoogleNewsUrl: async (gnUrl) => {
       try {
-        const decoded = await resolvePublisher(link);
-        add(decoded, title.replace(/\s+-\s+[^-]+$/, "").trim());
-      } catch { /* next item */ }
-      if (found.length >= 4) break;
-    }
-  } catch { /* google blocked */ }
-  if (found.length < 2) {
-    try {
-      const xml = await netText(
-        `https://www.bing.com/news/search?q=${encodeURIComponent(q)}&format=rss`,
-        { headers: HEADERS },
-      );
-      for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
-        const block = m[1];
-        const title = block.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i)?.[1] || "";
-        const link = (block.match(/<link>([^<]+)<\/link>/i)?.[1] || "").replace(/&amp;/g, "&");
-        const enc = link.match(/[?&]url=(https?%3a%2f%2f[^&]+)/i)?.[1];
-        let u = "";
-        if (enc) { try { u = decodeURIComponent(enc); } catch { u = ""; } }
-        else if (/^https?:\/\//i.test(link) && !/bing\.com/i.test(link)) u = link;
-        if (u) add(u, title.trim());
+        return await decodeGoogleNewsUrlCached(gnUrl, async (u) => {
+          try {
+            return await resolvePublisher(u);
+          } catch {
+            return null;
+          }
+        });
+      } catch {
+        return null;
       }
-    } catch { /* bing blocked */ }
-  }
-  found.sort((a, b) => topicScore(q, b.hint, "") - topicScore(q, a.hint, ""));
-  return found.slice(0, 4).map((item) => item.url);
+    },
+  });
 }
 
 async function resolveTargets(url: string, title: string) {

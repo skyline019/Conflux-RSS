@@ -119,7 +119,7 @@ export default function ArchiveView(p: Props) {
         {/* search */}
         <div className="relative mt-5 max-w-md">
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#b3a682]" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="在归档中全文搜索…"
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="在归档中搜索标题、摘要、正文、来源…"
             className="w-full rounded-lg border border-[#ddd3ba] bg-white py-2 pl-8 pr-3 text-[13px] outline-none transition placeholder:text-[#bdb295] focus:border-[#e85a1e] focus:ring-2 focus:ring-[#e85a1e]/15" />
         </div>
 

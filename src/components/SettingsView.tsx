@@ -8,10 +8,14 @@ import { Spinner, toast, Toggle, inputCls, labelCls, btnPrimary, btnGhost } from
 const isMobileApp = () =>
   typeof window !== "undefined" && Boolean((window as { __CONFLUX_MOBILE__?: boolean }).__CONFLUX_MOBILE__);
 
+type NotifyPerm = "granted" | "denied" | "prompt" | "unknown";
+
 type MobileBridge = {
   getRefreshPrefs: () => Promise<{ intervalMinutes: number; wifiOnly: boolean; notifyOnNew: boolean }>;
   setRefreshPrefs: (p: { intervalMinutes?: number; wifiOnly?: boolean; notifyOnNew?: boolean }) => Promise<void>;
   writeDownload: (filename: string, data: string | Blob, mime?: string) => Promise<unknown>;
+  getNotifyPermission?: () => Promise<NotifyPerm>;
+  requestNotifyPermission?: () => Promise<NotifyPerm>;
 };
 
 function mobileBridge(): MobileBridge | null {
@@ -52,6 +56,7 @@ export default function SettingsView({ onSettingsChanged }: { onSettingsChanged:
   const [refreshMins, setRefreshMins] = useState(60);
   const [wifiOnly, setWifiOnly] = useState(true);
   const [notifyOnNew, setNotifyOnNew] = useState(true);
+  const [notifyPerm, setNotifyPerm] = useState<NotifyPerm>("unknown");
   const [diag, setDiag] = useState<string>("");
 
   const load = useCallback(async () => {
@@ -64,6 +69,9 @@ export default function SettingsView({ onSettingsChanged }: { onSettingsChanged:
         setRefreshMins(p.intervalMinutes);
         setWifiOnly(p.wifiOnly);
         setNotifyOnNew(p.notifyOnNew);
+        if (bridge.getNotifyPermission) {
+          setNotifyPerm(await bridge.getNotifyPermission());
+        }
       } catch { /* ignore */ }
     }
   }, []);
@@ -73,7 +81,24 @@ export default function SettingsView({ onSettingsChanged }: { onSettingsChanged:
     const bridge = mobileBridge();
     if (!bridge) return;
     await bridge.setRefreshPrefs({ intervalMinutes: refreshMins, wifiOnly, notifyOnNew });
+    if (notifyOnNew && bridge.getNotifyPermission) {
+      const perm = await bridge.getNotifyPermission();
+      setNotifyPerm(perm);
+      if (perm !== "granted") {
+        toast("已保存，但通知权限未开启：系统不会弹出完成提醒", "error");
+        return;
+      }
+    }
     toast("手机刷新偏好已保存");
+  };
+
+  const requestNotify = async () => {
+    const bridge = mobileBridge();
+    if (!bridge?.requestNotifyPermission) return;
+    const perm = await bridge.requestNotifyPermission();
+    setNotifyPerm(perm);
+    if (perm === "granted") toast("通知权限已开启");
+    else toast("未获得通知权限。可在系统设置 → 应用 → 汇阅 → 通知 中手动开启", "error");
   };
 
   const exportBackup = async () => {
@@ -221,20 +246,23 @@ export default function SettingsView({ onSettingsChanged }: { onSettingsChanged:
 
   return (
     <section className="min-w-0 flex-1 overflow-y-auto bg-[#f6f3ec]">
-      <div className="mx-auto max-w-3xl px-6 py-6">
+      <div className="mx-auto max-w-3xl px-4 py-5 md:px-6 md:py-6">
         <div className="anim-fadeUp flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="font-serif text-[24px] font-black">设置</h1>
-            <p className="mt-1 text-[13px] text-[#6d6450]">大模型接入（可选）与抓取 / 去重 / 聚类算法参数。不接入大模型时，总结与对比自动使用本地算法。</p>
+            <h1 className="font-serif text-[22px] font-black md:text-[24px]">设置</h1>
+            <p className="mt-1 text-[12.5px] text-[#6d6450] md:text-[13px]">
+              <span className="md:hidden">大模型、抓取参数与手机后台刷新。</span>
+              <span className="hidden md:inline">大模型接入（可选）与抓取 / 去重 / 聚类算法参数。不接入大模型时，总结与对比自动使用本地算法。</span>
+            </p>
           </div>
-          <button onClick={save} disabled={saving} className={btnPrimary}>{saving ? <Spinner size={14} /> : <Save size={14} />} 保存全部设置</button>
+          <button onClick={save} disabled={saving} className={`${btnPrimary} min-h-[44px]`}>{saving ? <Spinner size={14} /> : <Save size={14} />} 保存全部设置</button>
         </div>
 
         <div className="mt-5 space-y-4">
           <Section
             icon={<Sparkles size={16} className="text-[#e85a1e]" />}
             title="大模型接入（OpenAI 兼容协议）"
-            desc="用于：单篇文章 AI 总结、同一事件多源报道的叙述/态度深度对比。API Key 只保存在本地数据库，请求由服务端发出，不会下发到浏览器。"
+            desc="用于：文章 AI 总结、事件多源对比，以及智能搜索聚合的短查询改写/标题精排（与总结共用此接入；未启用时仍用本地强聚合，体验对齐）。API Key 仅存本地，请求由服务端发出。"
           >
             <div className="flex items-center justify-between rounded-xl bg-[#faf5e8] px-3.5 py-2.5">
               <span className="text-[13px] font-medium">启用大模型</span>
@@ -362,22 +390,41 @@ export default function SettingsView({ onSettingsChanged }: { onSettingsChanged:
             <Section
               icon={<Smartphone size={16} className="text-[#e85a1e]" />}
               title="手机端 · 日常与备份"
-              desc="API Key 存 Preferences。后台由系统 WorkManager 定时唤醒：前台服务静默抓取，通知栏显示进度与完成结果（系统最短约 15 分钟）。"
+              desc="0.2.5：底部 Tab 直达。后台 WorkManager 抓取（最短约 15 分钟）与前台刷新互斥；完成通知可含新增篇数。"
             >
               <Slider
                 label="后台静默刷新间隔" value={refreshMins} min={0} max={360} step={15}
                 fmt={(v) => (v === 0 ? "关闭" : `${Math.max(15, v)} 分钟`)} onChange={setRefreshMins}
-                hint="设为 0 关闭。小于 15 会按 15 分钟调度（Android WorkManager 限制）。刷新时通知显示「x/y · 源名」，完成后汇总新增篇数。"
+                hint="设为 0 关闭。小于 15 会按 15 分钟调度。刷新中通知显示「x/y · 源名」。"
               />
-              <label className="flex items-center justify-between rounded-xl bg-[#faf5e8] px-3.5 py-2.5">
+              <label className="flex min-h-[44px] items-center justify-between rounded-xl bg-[#faf5e8] px-3.5 py-2.5">
                 <span className="text-[13px] font-medium">仅 Wi‑Fi 时后台刷新</span>
                 <Toggle checked={wifiOnly} onChange={setWifiOnly} />
               </label>
-              <label className="flex items-center justify-between rounded-xl bg-[#faf5e8] px-3.5 py-2.5">
-                <span className="text-[13px] font-medium">完成后通知（无新文也可提示）</span>
+              <label className="flex min-h-[44px] items-center justify-between rounded-xl bg-[#faf5e8] px-3.5 py-2.5">
+                <span className="text-[13px] font-medium">完成后通知（无新文也提示）</span>
                 <Toggle checked={notifyOnNew} onChange={setNotifyOnNew} />
               </label>
-              <button type="button" onClick={() => void saveMobilePrefs()} className={btnGhost}>保存并启用后台刷新</button>
+              <p className="text-[11px] leading-5 text-[#b3a682]">
+                关闭时：有新增或出错仍会通知；仅在「无新增且无错误」时静默。开启时：每次完成后都提示。
+              </p>
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-[#faf5e8] px-3.5 py-2.5 text-[12.5px]">
+                <span className="font-medium text-[#4c4433]">
+                  通知权限：
+                  {notifyPerm === "granted" ? "已开启" : notifyPerm === "denied" ? "已拒绝" : notifyPerm === "prompt" ? "未决定" : "未知"}
+                </span>
+                {notifyPerm !== "granted" && (
+                  <button type="button" onClick={() => void requestNotify()} className={`${btnGhost} !min-h-[40px] !py-1.5`}>
+                    请求权限
+                  </button>
+                )}
+              </div>
+              {notifyPerm === "denied" && (
+                <p className="text-[11.5px] leading-5 text-[#9a4a2f]">
+                  系统已拒绝通知。请到「设置 → 应用 → 汇阅 → 通知」手动开启后返回本页。
+                </p>
+              )}
+              <button type="button" onClick={() => void saveMobilePrefs()} className={`${btnGhost} min-h-[44px]`}>保存并启用后台刷新</button>
               <div className="flex flex-wrap gap-2">
                 <button type="button" disabled={!!mobileBusy} onClick={() => void exportBackup()} className={btnGhost}>
                   {mobileBusy === "backup" ? <Spinner size={13} /> : <Download size={13} />} 导出备份

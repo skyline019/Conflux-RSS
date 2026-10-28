@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw, AlertTriangle, Newspaper, Sparkles, ChevronRight } from "lucide-react";
 import type { ArticleLite, FeedRow } from "@/lib/client";
 import { api, timeAgo, proxiedImg } from "@/lib/client";
@@ -17,6 +17,9 @@ interface Props {
 export default function TodayView(p: Props) {
   const [articles, setArticles] = useState<ArticleLite[]>([]);
   const [loading, setLoading] = useState(true);
+  const scrollRef = useRef<HTMLElement>(null);
+  const pull = useRef<{ y0: number; pulling: boolean }>({ y0: 0, pulling: false });
+  const [pullDy, setPullDy] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,10 +52,48 @@ export default function TodayView(p: Props) {
     return [...map.values()].sort((a, b) => b.items.length - a.items.length);
   }, [articles, p.feeds]);
 
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (p.refreshing) return;
+    const el = scrollRef.current;
+    if (!el || el.scrollTop > 2) return;
+    pull.current = { y0: e.touches[0].clientY, pulling: true };
+  };
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (!pull.current.pulling) return;
+    const dy = Math.max(0, e.touches[0].clientY - pull.current.y0);
+    setPullDy(Math.min(88, dy * 0.55));
+  };
+  const onTouchEnd = () => {
+    if (!pull.current.pulling) return;
+    const should = pullDy >= 56;
+    pull.current.pulling = false;
+    setPullDy(0);
+    if (should) p.onRefreshAll();
+  };
+
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[#f6f3ec] pb-8">
-      <div className="border-b border-[#e3dccb] bg-[#faf7ef] px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))]">
-        <div className="flex items-start justify-between gap-3 pl-11 lg:pl-0">
+    <section
+      ref={scrollRef}
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain bg-[#f6f3ec] pb-8"
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchEnd}
+    >
+      {(pullDy > 0 || p.refreshing) && (
+        <div
+          className="pointer-events-none sticky top-0 z-[1] flex items-center justify-center gap-1.5 overflow-hidden text-[12px] font-medium text-[#e85a1e] transition-[height] md:hidden"
+          style={{ height: p.refreshing ? 36 : pullDy }}
+        >
+          {p.refreshing || pullDy >= 56 ? (
+            <><Spinner size={12} /> {p.refreshing ? (p.refreshHint || "正在抓取…") : "松开刷新"}</>
+          ) : (
+            "下拉刷新订阅"
+          )}
+        </div>
+      )}
+      <div className="border-b border-[#e3dccb] bg-[#faf7ef] px-4 pb-4 pt-4">
+        <div className="flex items-start justify-between gap-3 pl-14 lg:pl-0">
           <div>
             <h1 className="font-serif text-[22px] font-black text-[#1b1812]">今日</h1>
             <p className="mt-1 text-[12.5px] text-[#9a917c]">
@@ -63,9 +104,9 @@ export default function TodayView(p: Props) {
             type="button"
             onClick={p.onRefreshAll}
             disabled={p.refreshing}
-            className="inline-flex items-center gap-1.5 rounded-full bg-[#e85a1e] px-3 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-60"
+            className="inline-flex h-11 min-w-[44px] items-center justify-center gap-1.5 rounded-full bg-[#e85a1e] px-3.5 text-[12.5px] font-semibold text-white disabled:opacity-60"
           >
-            {p.refreshing ? <Spinner size={13} /> : <RefreshCw size={13} />}
+            {p.refreshing ? <Spinner size={14} /> : <RefreshCw size={14} />}
             {p.refreshing ? (p.refreshHint || "抓取中…") : "刷新全部"}
           </button>
         </div>

@@ -1,10 +1,30 @@
 import { CATALOG, CATALOG_REV } from "../../desktop/catalog.mjs";
-import { all, beginBulkWrite, endBulkWrite, exec, exportDbBytes, get, getSchemaVersion, openDatabase, replaceDatabase, run, saveNow, type Row } from "./db";
+import {
+  all, beginBulkWrite, clearArticlesFts, deleteArticleFtsRow, deleteArticlesFtsForFeed, endBulkWrite, ensureArticlesFts,
+  exec, exportDbBytes, get, getSchemaVersion, openDatabase, replaceDatabase, run, saveNow, upsertArticleFtsRow, type Row,
+} from "./db";
 import { netConditional, netFetch, netText, setRawFetch } from "./net";
 import { parseMediaUrl, normalizeMediaItem } from "@/lib/media";
+import { buildFtsMatchExpression, buildSearchDocument, escapeLike, parseSearchQuery } from "@/lib/articleSearch";
+import { expandArticleHitsWithClusters, rankClustersByQuery } from "@/lib/eventSearch";
+import {
+  expandQueryLocally,
+  llmRewriteTerms,
+  runSearchAggregateCore,
+  type AggregateArticle,
+} from "@/lib/searchAggregate";
+import {
+  buildLayer0ForEvent,
+  mergeArcPartials,
+  selectCrossFeedArticlesForCompare,
+  type ComparisonResult,
+} from "@/lib/compareArc";
+import { searchNewsCandidates } from "@/lib/newsSearch";
 import { countWords, discoverFeeds, extractArticle, parseFeed, strip } from "./read";
 import { clearLlmApiKey, getLlmApiKey, setLlmApiKey } from "./secure";
+import packageJson from "../package.json";
 
+const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.5");
 const COLORS = ["#ee802f", "#2563eb", "#7c3aed", "#059669", "#dc2626", "#0e7490", "#b45309", "#be185d", "#334155"];
 const nowIso = () => new Date().toISOString();
 const sqlText = (value: unknown): string | null => (value == null ? null : String(value));
@@ -75,7 +95,13 @@ async function saveSettings(patch: Record<string, unknown>) {
 }
 function mask(s: typeof DEFAULTS & { llmApiKey?: string }) {
   const key = s.llmApiKey || "";
-  return { ...s, llmApiKey: "", llmApiKeyMasked: key ? `••••••••${key.slice(-4)}` : "", hasApiKey: Boolean(key), proxyInUse: "" };
+  return {
+    ...s,
+    llmApiKey: "",
+    llmApiKeyMasked: key ? `••••••••${key.slice(-4)}` : "",
+    hasApiKey: Boolean(key),
+    proxyInUse: "",
+  };
 }
 function llmReady(s: typeof DEFAULTS & { llmApiKey?: string }) {
   return Boolean(s.llmEnabled && s.llmBaseUrl && s.llmModel && (s.llmApiKey || s.llmProvider === "ollama"));
@@ -108,7 +134,7 @@ function parseJsonList(value: unknown) {
   if (Array.isArray(value)) return value;
   try { const parsed = JSON.parse(String(value || "[]")); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
 }
-function articleLite(row: Row) {
+function articleLite(row: Row, relatedViaCluster = false) {
   return {
     ...boolRow(row, ["isRead", "isStarred", "isArchived"]),
     keywords: JSON.parse(String(row.keywords || "[]")),
@@ -122,10 +148,248 @@ function articleLite(row: Row) {
     images: parseJsonList(row.images),
     media: parseJsonList(row.media),
     author: row.author ?? null,
+    relatedViaCluster: Boolean(relatedViaCluster),
     rssSummary: row.rssSummary ?? null,
     scrollOffset: Number(row.scrollOffset || 0),
   };
 }
+function refreshArticleFts(articleId: number) {
+  const row = get<Row>(`
+    select a.title, a.author, a.rss_summary as rssSummary, a.content, a.ai_summary as aiSummary, a.keywords,
+      f.title as feedTitle
+    from articles a join feeds f on f.id = a.feed_id where a.id = ?
+  `, [articleId]);
+  if (!row) {
+    deleteArticleFtsRow(articleId);
+    return;
+  }
+  let keywords: string[] | string | null = null;
+  try {
+    keywords = JSON.parse(String(row.keywords || "[]"));
+  } catch {
+    keywords = String(row.keywords || "");
+  }
+  const doc = buildSearchDocument({
+    title: String(row.title || ""),
+    author: row.author == null ? null : String(row.author),
+    feedTitle: row.feedTitle == null ? null : String(row.feedTitle),
+    rssSummary: row.rssSummary == null ? null : String(row.rssSummary),
+    content: row.content == null ? null : String(row.content),
+    aiSummary: row.aiSummary == null ? null : String(row.aiSummary),
+    keywords,
+  });
+  upsertArticleFtsRow(articleId, doc);
+}
+
+function rebuildAllArticleFts() {
+  ensureArticlesFts();
+  clearArticlesFts();
+  const ids = all<{ id: number }>("select id from articles");
+  for (const row of ids) refreshArticleFts(Number(row.id));
+}
+
+async function searchAggregate(sp: URLSearchParams) {
+  const started = Date.now();
+  const q = (sp.get("q") || sp.get("search") || "").trim();
+  const related = sp.get("related") !== "0";
+  const external = sp.get("external") !== "0";
+  const clusterId = Number(sp.get("clusterId")) || 0;
+  const limit = Math.min(80, Math.max(5, Number(sp.get("limit")) || 40));
+  if (!q) {
+    return {
+      q: "",
+      engine: "fts" as const,
+      library: [],
+      clusters: [],
+      external: [],
+      meta: { libraryTotal: 0, llmUsed: false, llmCacheHit: false, externalOk: false, tookMs: Date.now() - started },
+    };
+  }
+
+  const s = await settingsResolved();
+  const ready = llmReady(s);
+
+  const listSp = new URLSearchParams(sp);
+  listSp.set("search", q);
+  listSp.set("page", "1");
+  listSp.set("pageSize", String(Math.min(80, limit * 2)));
+  listSp.set("related", "0");
+  const listed = listArticles(listSp);
+  const toAgg = (a: Record<string, unknown>, extra: Partial<AggregateArticle> = {}): AggregateArticle => ({
+    ...a,
+    id: Number(a.id),
+    title: String(a.title || ""),
+    clusterId: a.clusterId == null ? null : Number(a.clusterId),
+    publishedAt: (a.publishedAt as string | null) || (a.createdAt as string | null) || null,
+    ...extra,
+  });
+  let hits: AggregateArticle[] = listed.articles.map((a, i) =>
+    toAgg(a as Record<string, unknown>, { ftsHit: true, ftsRank: i }),
+  );
+
+  // Local lexical weak recall by expand terms on titles
+  const terms = expandQueryLocally(q);
+  if (terms.length) {
+    const likeParts: string[] = [];
+    const likeArgs: (string | number | null)[] = [];
+    for (const term of terms.slice(0, 6)) {
+      likeParts.push("(a.title like ? escape '\\' or ifnull(a.keywords,'') like ? escape '\\')");
+      const like = `%${escapeLike(term)}%`;
+      likeArgs.push(like, like);
+    }
+    const weak = all(`
+      select a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
+        a.rss_summary as rssSummary, a.ai_summary as aiSummary, a.ai_source as aiSource,
+        a.full_text_status as fullTextStatus, a.image_url as imageUrl, a.resolved_link as resolvedLink,
+        a.video_url as videoUrl, a.images, a.media, a.word_count as wordCount, a.keywords,
+        a.is_read as isRead, a.is_starred as isStarred, a.is_archived as isArchived, a.dup_count as dupCount,
+        a.stance_score as stanceScore, a.published_at as publishedAt, a.fetched_at as fetchedAt, a.created_at as createdAt,
+        a.scroll_offset as scrollOffset,
+        f.title as feedTitle, f.color as feedColor, f.category as feedCategory,
+        substr(coalesce(a.content, a.rss_summary, a.ai_summary, ''), 1, 220) as excerpt
+      from articles a join feeds f on f.id = a.feed_id
+      where (${likeParts.join(" or ")})
+      order by coalesce(a.published_at, a.created_at) desc limit 40
+    `, likeArgs) as Row[];
+    const seen = new Set(hits.map((h) => h.id));
+    for (const row of weak) {
+      const id = Number(row.id);
+      if (seen.has(id)) continue;
+      hits.push(toAgg(articleLite(row) as Record<string, unknown>, { ftsHit: false, ftsRank: hits.length + 50 }));
+      seen.add(id);
+    }
+  }
+
+  let extraHits: AggregateArticle[] = [];
+  if (ready && hits.length < 12) {
+    try {
+      const { terms: rw } = await llmRewriteTerms(q, async (messages, opts) =>
+        chat(messages, opts?.maxTokens ?? 80, opts?.temperature ?? 0, s),
+      );
+      if (rw.length) {
+        const likeParts: string[] = [];
+        const likeArgs: (string | number | null)[] = [];
+        for (const term of rw.slice(0, 4)) {
+          likeParts.push("a.title like ? escape '\\'");
+          likeArgs.push(`%${escapeLike(term)}%`);
+        }
+        const more = all(`
+          select a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
+            a.keywords, a.published_at as publishedAt, a.created_at as createdAt,
+            f.title as feedTitle, f.color as feedColor, f.category as feedCategory,
+            a.rss_summary as rssSummary, a.ai_summary as aiSummary, a.ai_source as aiSource,
+            a.full_text_status as fullTextStatus, a.image_url as imageUrl, a.resolved_link as resolvedLink,
+            a.video_url as videoUrl, a.images, a.media, a.word_count as wordCount,
+            a.is_read as isRead, a.is_starred as isStarred, a.is_archived as isArchived, a.dup_count as dupCount,
+            a.stance_score as stanceScore, a.fetched_at as fetchedAt, a.scroll_offset as scrollOffset,
+            substr(coalesce(a.content, a.rss_summary, a.ai_summary, ''), 1, 220) as excerpt
+          from articles a join feeds f on f.id = a.feed_id
+          where (${likeParts.join(" or ")}) limit 40
+        `, likeArgs) as Row[];
+        extraHits = more.map((row, i) =>
+          toAgg(articleLite(row) as Record<string, unknown>, { ftsHit: false, ftsRank: 100 + i }),
+        );
+      }
+    } catch { /* silent */ }
+  }
+
+  const membersByCluster = new Map<number, AggregateArticle[]>();
+  if (related && !clusterId) {
+    const clusterIds = [...new Set(
+      [...hits, ...extraHits].map((h) => Number(h.clusterId)).filter((id) => id > 0),
+    )];
+    if (clusterIds.length) {
+      const siblings = all(`
+        select a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
+          a.keywords, a.published_at as publishedAt, a.created_at as createdAt,
+          f.title as feedTitle, f.color as feedColor, f.category as feedCategory,
+          a.rss_summary as rssSummary, a.ai_summary as aiSummary, a.ai_source as aiSource,
+          a.full_text_status as fullTextStatus, a.image_url as imageUrl, a.resolved_link as resolvedLink,
+          a.video_url as videoUrl, a.images, a.media, a.word_count as wordCount,
+          a.is_read as isRead, a.is_starred as isStarred, a.is_archived as isArchived, a.dup_count as dupCount,
+          a.stance_score as stanceScore, a.fetched_at as fetchedAt, a.scroll_offset as scrollOffset,
+          substr(coalesce(a.content, a.rss_summary, a.ai_summary, ''), 1, 220) as excerpt
+        from articles a join feeds f on f.id = a.feed_id
+        where a.cluster_id in (${clusterIds.map(() => "?").join(",")})
+        limit 200
+      `, clusterIds) as Row[];
+      for (const row of siblings) {
+        const cid = Number(row.clusterId);
+        if (!cid) continue;
+        const bag = membersByCluster.get(cid) || [];
+        bag.push(toAgg(articleLite(row) as Record<string, unknown>));
+        membersByCluster.set(cid, bag);
+      }
+    }
+  }
+
+  const clusterInputs = all<Row>("select * from clusters where article_count >= 2 order by last_seen_at desc limit 80")
+    .map(clusterView)
+    .map((c) => ({
+      id: Number(c.id),
+      title: String(c.title || ""),
+      keywords: c.keywords as string[],
+      lastSeenAt: (c.lastSeenAt as string | null) ?? null,
+      memberTitles: (c.members || []).map((m: { title?: string }) => String(m.title || "")),
+    }));
+
+  let externalHits: { title: string; url: string; source: string; score?: number }[] = [];
+  let externalOk = false;
+  if (external) {
+    try {
+      const res = await searchNewsCandidates(q, {
+        limit: 8,
+        fetchText: (url, opts) =>
+          netText(url, {
+            headers: opts?.headers,
+            method: opts?.method,
+            body: opts?.body,
+            timeoutMs: opts?.timeoutMs ?? 12000,
+          }),
+        decodeGoogleNewsUrl: async () => null,
+      });
+      externalOk = true;
+      externalHits = (res.hits || []).map((h) => ({
+        title: h.title,
+        url: h.url,
+        source: h.source,
+        score: h.score,
+      }));
+    } catch {
+      externalOk = false;
+    }
+  }
+
+  const result = await runSearchAggregateCore({
+    q,
+    hits,
+    extraHits,
+    membersByCluster,
+    clusters: clusterInputs,
+    external: externalHits,
+    externalOk,
+    related: related && !clusterId,
+    limit,
+    llmReady: ready,
+    chat: ready
+      ? async (messages, opts) => chat(messages, opts?.maxTokens ?? 180, opts?.temperature ?? 0, s)
+      : undefined,
+    startedAt: started,
+  });
+
+  return {
+    q: result.q,
+    engine: result.engine,
+    library: result.library.map((r) => {
+      const { ftsHit: _f, ftsRank: _r, fuseScore: _s, ...rest } = r;
+      return { ...rest, relatedViaCluster: Boolean(r.relatedViaCluster) };
+    }),
+    clusters: result.clusters,
+    external: result.external,
+    meta: result.meta,
+  };
+}
+
 function listArticles(sp: URLSearchParams) {
   const feedId = Number(sp.get("feedId")) || 0;
   const category = sp.get("category") || "";
@@ -133,28 +397,23 @@ function listArticles(sp: URLSearchParams) {
   const search = (sp.get("search") || "").trim();
   const collectionId = Number(sp.get("collectionId")) || 0;
   const clusterId = Number(sp.get("clusterId")) || 0;
+  const related = search ? sp.get("related") !== "0" : false;
   const page = Math.max(1, Number(sp.get("page")) || 1);
   const pageSize = Math.min(100, Math.max(5, Number(sp.get("pageSize")) || 30));
-  const where = ["1 = 1"];
-  const args: (string | number | null)[] = [];
-  if (feedId) { where.push("a.feed_id = ?"); args.push(feedId); }
-  if (category) { where.push("f.category = ?"); args.push(category); }
-  if (clusterId) { where.push("a.cluster_id = ?"); args.push(clusterId); }
-  if (view === "inbox") where.push("a.is_archived = 0");
-  if (view === "unread") where.push("a.is_read = 0 and a.is_archived = 0");
-  if (view === "starred") where.push("a.is_starred = 1");
-  if (view === "archived") where.push("a.is_archived = 1");
-  if (view === "media") where.push("(a.video_url is not null and a.video_url != '' or (a.media is not null and a.media != '' and a.media != '[]'))");
-  if (collectionId) { where.push("a.id in (select article_id from article_collections where collection_id = ?)"); args.push(collectionId); }
-  if (search) {
-    where.push("(a.title like ? or a.content like ? or a.author like ? or f.title like ?)");
-    const like = `%${search}%`;
-    args.push(like, like, like, like);
-  }
-  const clause = where.join(" and ");
-  const total = Number(get<{ n: number }>(`select count(*) as n from articles a join feeds f on f.id = a.feed_id where ${clause}`, args)?.n || 0);
-  const rows = all(`
-    select a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
+
+  const baseWhere: string[] = ["1 = 1"];
+  const baseArgs: (string | number | null)[] = [];
+  if (feedId) { baseWhere.push("a.feed_id = ?"); baseArgs.push(feedId); }
+  if (category) { baseWhere.push("f.category = ?"); baseArgs.push(category); }
+  if (clusterId) { baseWhere.push("a.cluster_id = ?"); baseArgs.push(clusterId); }
+  if (view === "inbox") baseWhere.push("a.is_archived = 0");
+  if (view === "unread") baseWhere.push("a.is_read = 0 and a.is_archived = 0");
+  if (view === "starred") baseWhere.push("a.is_starred = 1");
+  if (view === "archived") baseWhere.push("a.is_archived = 1");
+  if (view === "media") baseWhere.push("(a.video_url is not null and a.video_url != '' or (a.media is not null and a.media != '' and a.media != '[]'))");
+  if (collectionId) { baseWhere.push("a.id in (select article_id from article_collections where collection_id = ?)"); baseArgs.push(collectionId); }
+
+  const selectCols = `a.id, a.feed_id as feedId, a.cluster_id as clusterId, a.title, a.link, a.author,
       a.rss_summary as rssSummary, a.ai_summary as aiSummary, a.ai_source as aiSource,
       a.full_text_status as fullTextStatus, a.image_url as imageUrl, a.resolved_link as resolvedLink,
       a.video_url as videoUrl, a.images, a.media, a.word_count as wordCount, a.keywords,
@@ -162,14 +421,124 @@ function listArticles(sp: URLSearchParams) {
       a.stance_score as stanceScore, a.published_at as publishedAt, a.fetched_at as fetchedAt, a.created_at as createdAt,
       a.scroll_offset as scrollOffset,
       f.title as feedTitle, f.color as feedColor, f.category as feedCategory,
-      substr(coalesce(a.content, a.rss_summary, ''), 1, 220) as excerpt
-    from articles a join feeds f on f.id = a.feed_id
-    where ${clause}
-    order by coalesce(a.published_at, a.created_at) desc
-    limit ? offset ?
-  `, [...args, pageSize, (page - 1) * pageSize]);
-  return { articles: rows.map(articleLite), total, page, pageSize };
+      substr(coalesce(a.content, a.rss_summary, a.ai_summary, ''), 1, 220) as excerpt`;
+
+  const fetchRows = (where: string[], args: (string | number | null)[], opts: { fts?: boolean; limit: number; offset: number }) => {
+    const clause = where.join(" and ");
+    const fromSql = opts.fts
+      ? "articles a join feeds f on f.id = a.feed_id join articles_fts fts on fts.rowid = a.id"
+      : "articles a join feeds f on f.id = a.feed_id";
+    const orderSql = opts.fts
+      ? "order by bm25(fts), coalesce(a.published_at, a.created_at) desc"
+      : "order by coalesce(a.published_at, a.created_at) desc";
+    const total = Number(get<{ n: number }>(`select count(*) as n from ${fromSql} where ${clause}`, args)?.n || 0);
+    const rows = all(`
+      select ${selectCols}
+      from ${fromSql}
+      where ${clause}
+      ${orderSql}
+      limit ? offset ?
+    `, [...args, opts.limit, opts.offset]) as Row[];
+    return { rows, total };
+  };
+
+  const likeWhere = [...baseWhere];
+  const likeArgs = [...baseArgs];
+  const parsed = search ? parseSearchQuery(search) : null;
+  if (parsed?.terms.length) {
+    for (const term of parsed.terms) {
+      const like = `%${escapeLike(term)}%`;
+      likeWhere.push(`(a.title like ? escape '\\' or ifnull(a.content,'') like ? escape '\\' or ifnull(a.author,'') like ? escape '\\' or f.title like ? escape '\\' or ifnull(a.rss_summary,'') like ? escape '\\' or ifnull(a.ai_summary,'') like ? escape '\\' or ifnull(a.keywords,'') like ? escape '\\')`);
+      likeArgs.push(like, like, like, like, like, like, like);
+    }
+  }
+
+  let searchWhere = baseWhere;
+  let searchArgs = baseArgs;
+  let useFts = false;
+  const matchExpr = parsed ? buildFtsMatchExpression(parsed) : null;
+  if (search && matchExpr) {
+    try {
+      searchWhere = [...baseWhere, "fts match ?"];
+      searchArgs = [...baseArgs, matchExpr];
+      const probe = fetchRows(searchWhere, searchArgs, { fts: true, limit: 1, offset: 0 });
+      if (probe.total > 0 || !parsed?.terms.length) useFts = true;
+      else {
+        searchWhere = likeWhere;
+        searchArgs = likeArgs;
+      }
+    } catch {
+      searchWhere = likeWhere;
+      searchArgs = likeArgs;
+    }
+  } else if (search && parsed?.terms.length) {
+    searchWhere = likeWhere;
+    searchArgs = likeArgs;
+  }
+
+  // Related-cluster expansion when searching (unless filtering a single cluster)
+  if (search && related && !clusterId) {
+    type HitRow = { id: number; title: string; clusterId: number | null; publishedAt: string; ftsHit?: boolean; ftsRank?: number; row: Row };
+    const windowSize = Math.min(80, Math.max(pageSize * 3, 40));
+    const { rows: hitRows } = fetchRows(searchWhere, searchArgs, { fts: useFts, limit: windowSize, offset: 0 });
+    const clusterIds = [...new Set(hitRows.map((r) => Number(r.clusterId)).filter((id) => id > 0))];
+    const membersByCluster = new Map<number, HitRow[]>();
+    if (clusterIds.length) {
+      // clusterId filter is absent when expanding; reuse baseWhere/baseArgs as-is
+      const sibWhere = [...baseWhere, `a.cluster_id in (${clusterIds.map(() => "?").join(",")})`];
+      const siblings = all(`
+        select ${selectCols}
+        from articles a join feeds f on f.id = a.feed_id
+        where ${sibWhere.join(" and ")}
+        limit 200
+      `, [...baseArgs, ...clusterIds]) as Row[];
+      for (const s of siblings) {
+        const cid = Number(s.clusterId);
+        if (!cid) continue;
+        const bag = membersByCluster.get(cid) || [];
+        bag.push({
+          id: Number(s.id),
+          title: String(s.title || ""),
+          clusterId: cid,
+          publishedAt: String(s.publishedAt || s.createdAt || ""),
+          row: s,
+        });
+        membersByCluster.set(cid, bag);
+      }
+    }
+
+    const expanded = expandArticleHitsWithClusters(
+      search,
+      hitRows.map((h, i): HitRow => ({
+        id: Number(h.id),
+        title: String(h.title || ""),
+        clusterId: h.clusterId == null ? null : Number(h.clusterId),
+        publishedAt: String(h.publishedAt || h.createdAt || ""),
+        ftsHit: true,
+        ftsRank: i,
+        row: h,
+      })),
+      membersByCluster,
+      { limit: 500 },
+    );
+    const total = expanded.length;
+    const pageSlice = expanded.slice((page - 1) * pageSize, page * pageSize);
+    return {
+      articles: pageSlice.map((r) => articleLite(r.row, r.relatedViaCluster)),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
+  const { rows, total } = fetchRows(searchWhere, searchArgs, {
+    fts: useFts,
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
+  });
+  return { articles: rows.map((r) => articleLite(r)), total, page, pageSize };
 }
+
 function articleFull(id: number) {
   const row = get<Row>(`
     select a.*, f.title as feedTitle, f.color as feedColor, f.category as feedCategory, f.url as feedUrl
@@ -201,24 +570,29 @@ function articleFull(id: number) {
   };
 }
 
-const SUM_SYSTEM = `你是一名资深新闻编辑与信息分析师。请基于用户提供的文章原文做结构化分析。
+const SUM_SYSTEM = `你是一名资深新闻编辑与信息分析师。请基于用户提供的文章原文做结构化分析，内容要详实、便于深度阅读。
 要求：
-1. 只依据原文内容，不得编造事实；信息不足的字段填 null 或空数组。
+1. 以原文为依据；可对因果与背景做合理延展，但不得捏造原文未出现的具体数字、日期或引语。信息不足的字段填 null 或空数组。
 2. 用中文输出。
 3. 严格输出 JSON，不要加入任何解释性文字或代码块标记。
 JSON 结构：
 {
   "tldr": "一句话结论，40字以内",
-  "summary": "150-260字的客观摘要",
-  "bullets": ["要点1","要点2"],
+  "summary": "300-450字客观详实摘要，涵盖何人/何事/何时/何地/为何与结果",
+  "whatHappened": "80-160字事件经过拆解",
+  "background": "60-140字背景铺垫（前文脉络、相关政策或争议）",
+  "implications": "60-140字影响与可能后续",
+  "bullets": ["要点1","要点2","要点3","要点4","要点5"],
   "entities": [{"name":"实体","type":"人物|机构|地点|产品|事件","role":"在文中的作用"}],
   "numbers": ["文中关键数据及含义"],
   "stance": {"tone":"positive|neutral|negative","label":"倾向描述","evidence":"判断依据原文片段"},
   "quality": {"depth":1-5,"evidence":1-5,"novelty":1-5,"note":"评价一句话"},
   "tags": ["标签"],
-  "questions": ["读者延伸追问"],
+  "questions": ["读者延伸追问1","追问2","追问3"],
   "reading_time_min": 数字
 }`;
+
+const ARC_JSON_SHAPE = `{"overallSummary":"详实总览200-400字","consensus":["共识"],"divergences":[{"aspect":"维度","description":"说明"}],"timeline":[{"time":"时间","event":"事件标题","detail":"经过与细节","impact":"影响","source":"媒体","confidence":0到1,"kind":"reported|ai_supplement","actors":["行为体"]}],"countryOrActorAttitudes":[{"actor":"国家或机构","attitude":"中立|客观|主观|积极|消极","score":-1到1,"summary":"2-4句立场概述","rationale":"为何持该态度","drivers":["驱动因素"],"evidenceQuotes":["原文短引"],"supplementNote":"若含分析补充则注明否则空"}],"sources":[{"articleId":数字,"stanceScore":-1到1,"stanceLabel":"五类之一","attitude":{"valence":-1到1,"objectivity":0到1,"label":"中立|客观|主观|积极|消极"},"narrative":"叙述框架","tone":"语气","keyPoints":["论点"],"uniqueInfo":["独有信息"],"framingWords":["倾向词"]}]}`;
 
 function summaryFromParsed(parsed: Record<string, unknown>) {
   const bullets = (Array.isArray(parsed.bullets) ? parsed.bullets : Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [])
@@ -237,6 +611,9 @@ function summaryFromParsed(parsed: Record<string, unknown>) {
     quality: parsed.quality as { depth?: number; evidence?: number; novelty?: number; note?: string } | undefined,
     questions: Array.isArray(parsed.questions) ? parsed.questions.map(String) : [],
     readingTimeMin: typeof parsed.reading_time_min === "number" ? parsed.reading_time_min : undefined,
+    background: parsed.background ? String(parsed.background) : undefined,
+    whatHappened: parsed.whatHappened ? String(parsed.whatHappened) : undefined,
+    implications: parsed.implications ? String(parsed.implications) : undefined,
     raw: parsed,
   };
 }
@@ -255,6 +632,7 @@ function persistAi(id: number, result: ReturnType<typeof summaryFromParsed> & { 
         tldr: result.tldr, summary: result.summary, bullets: result.keyPoints, tags: result.keywords,
         entities: result.entities, numbers: result.numbers, stance: result.stance,
         quality: result.quality, questions: result.questions, reading_time_min: result.readingTimeMin,
+        background: result.background, whatHappened: result.whatHappened, implications: result.implications,
       }),
       nowIso(),
       result.keywords.length ? "1" : "",
@@ -263,6 +641,7 @@ function persistAi(id: number, result: ReturnType<typeof summaryFromParsed> & { 
       id,
     ],
   );
+  refreshArticleFts(id);
 }
 
 async function chatStream(
@@ -371,6 +750,7 @@ async function storeFullText(id: number) {
         extracted.sourceUrl, extracted.videoUrl || "", JSON.stringify(extracted.images || []), JSON.stringify(extracted.media || []), id,
       ],
     );
+    refreshArticleFts(id);
     return { ok: true, wordCount: extracted.wordCount };
   } catch {
     run("update articles set full_text_status = 'failed', fulltext_tries = fulltext_tries + 1 where id = ? and full_text_status != 'success'", [id]);
@@ -400,8 +780,8 @@ async function summarize(id: number, onDelta?: (chunk: string) => void) {
     { role: "user", content: `【标题】${article.title}\n【正文】\n${body.slice(0, 12000)}` },
   ];
   const raw = onDelta
-    ? await chatStream(messages, onDelta, 1800, 0.3, current)
-    : await chat(messages, 1800, 0.3, current);
+    ? await chatStream(messages, onDelta, 2500, 0.3, current)
+    : await chat(messages, 2500, 0.3, current);
   const parsed = parseJsonLoose(raw) as Record<string, unknown>;
   const shaped = summaryFromParsed(parsed);
   if (!shaped.summary) throw new Error("大模型没有返回摘要");
@@ -449,7 +829,11 @@ async function refreshFeed(feed: Row) {
       status, item.imageUrl, countWords(packed.content), item.publishedAt, nowIso(), nowIso(),
       matched?.action === "mark_read" ? 1 : 0, matched?.action === "star" ? 1 : 0, matched?.action === "archive" ? 1 : 0,
     ]);
-    if (inserted.changes > 0) { added += 1; if (status === "pending") fresh.push(inserted.lastId); }
+    if (inserted.changes > 0) {
+      added += 1;
+      refreshArticleFts(inserted.lastId);
+      if (status === "pending") fresh.push(inserted.lastId);
+    }
     else duplicates += 1;
     if (matched) run("update rules set hit_count = hit_count + 1, last_hit_at = ? where id = ?", [nowIso(), Number(matched.id)]);
   }
@@ -602,10 +986,12 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
   const current = settings();
   const threshold = Number(current.clusterThreshold) || 0.27;
   const windowMs = (Number(current.clusterWindowHours) || 96) * 2 * 3600 * 1000;
-  const raw = all<Row>(`select id, title, feed_id as feedId, substr(coalesce(content, rss_summary, ''), 1, 500) as body, coalesce(published_at, created_at) as seen from articles where length(title) >= 4 order by seen desc`);
+  // Full corpus, full body for keywords (never ai_summary)
+  const raw = all<Row>(`select id, title, feed_id as feedId, coalesce(content, rss_summary, '') as body, coalesce(published_at, created_at) as seen from articles where length(title) >= 4 order by seen desc`);
   const rows: ClusterRow[] = raw.map((row, i) => {
     if (i % 40 === 0) onProgress?.({ phase: "keywords", done: i, total: raw.length });
     run("update articles set keywords = ? where id = ?", [JSON.stringify(keywordsOf(String(row.title), String(row.body || ""))), Number(row.id)]);
+    refreshArticleFts(Number(row.id));
     return {
       id: Number(row.id),
       title: String(row.title),
@@ -650,10 +1036,14 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
     let bestScore = 0;
     const seen = new Set<object>();
     for (const other of recent) {
+      if (other.feedId === row.feedId) continue; // cross-feed only
       if (seen.has(other.bucket)) continue;
       seen.add(other.bucket);
       let score = 0;
-      for (const member of other.bucket.members.slice(0, 5)) score = Math.max(score, scoreOf(row, member));
+      for (const member of other.bucket.members.slice(0, 5)) {
+        if (member.feedId === row.feedId) continue;
+        score = Math.max(score, scoreOf(row, member));
+      }
       if (score > bestScore) { bestScore = score; best = other.bucket; }
     }
     const bucket: Bucket = best && bestScore >= threshold ? best : { members: [] };
@@ -670,7 +1060,7 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
       writeDone += 1;
       if (writeDone % 10 === 0) onProgress?.({ phase: "write", done: writeDone, total: buckets.length });
       const feedSet = new Set(bucket.members.map((member) => member.feedId));
-      if (feedSet.size < 2 && bucket.members.length < 4) continue;
+      if (feedSet.size < 2) continue; // multi-source events only
       const clusterId = run("insert into clusters(title, keywords, created_at) values(?, ?, ?)", [String(bucket.members[0].title), JSON.stringify(bucket.members[0].keywords), nowIso()]).lastId;
       for (const member of bucket.members) { run("update articles set cluster_id = ? where id = ?", [clusterId, Number(member.id)]); assigned += 1; }
     }
@@ -679,7 +1069,7 @@ function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total:
   onProgress?.({ phase: "write", done: buckets.length, total: buckets.length });
   for (const cluster of all<{ id: number }>("select id from clusters")) {
     const stat = get<Row>("select count(*) as n, count(distinct feed_id) as sources, min(coalesce(published_at, created_at)) as firstSeen, max(coalesce(published_at, created_at)) as lastSeen from articles where cluster_id = ?", [cluster.id]);
-    if (!stat || Number(stat.n) < 2) { run("update articles set cluster_id = null where cluster_id = ?", [cluster.id]); run("delete from clusters where id = ?", [cluster.id]); continue; }
+    if (!stat || Number(stat.n) < 2 || Number(stat.sources) < 2) { run("update articles set cluster_id = null where cluster_id = ?", [cluster.id]); run("delete from clusters where id = ?", [cluster.id]); continue; }
     const titles = all<{ title: string }>("select title from articles where cluster_id = ?", [cluster.id]).map((row) => row.title);
     const title = titles.slice().sort((a, b) => Math.abs(a.length - 26) - Math.abs(b.length - 26))[0];
     run("update clusters set title = ?, article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [title, Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), cluster.id]);
@@ -738,34 +1128,154 @@ function clusterView(row: Row) {
   };
 }
 
+/** External headline search → LLM enrich timeline + country rationale (mirrors web llm.ts). */
+async function enrichArcWithExternalNewsMobile(
+  eventTitle: string,
+  arc: ComparisonResult,
+  current: Awaited<ReturnType<typeof settingsResolved>>,
+): Promise<Partial<ComparisonResult> | null> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    let hits: { title: string; url: string; source: string; score?: number }[] = [];
+    try {
+      const res = await searchNewsCandidates(eventTitle.slice(0, 80), {
+        limit: 8,
+        fetchText: (url, opts) =>
+          netText(url, {
+            headers: opts?.headers,
+            method: opts?.method,
+            body: opts?.body,
+            timeoutMs: opts?.timeoutMs ?? 8000,
+          }),
+        decodeGoogleNewsUrl: async () => null,
+      });
+      hits = (res.hits || []).map((h) => ({
+        title: h.title,
+        url: h.url,
+        source: h.source,
+        score: h.score,
+      }));
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!hits.length || ctrl.signal.aborted) return null;
+    const raw = await chat([
+      {
+        role: "system",
+        content:
+          '你是事件脉络研究员。根据站外检索到的标题线索，补充时间线节点并加深国家/行为体态度的 rationale。新增 timeline 节点必须 kind=ai_supplement、confidence≤0.65；与已有报道冲突时以已有报道为准。禁止捏造具体数字/日期/引语。只输出 JSON：{"timeline":[],"countryOrActorAttitudes":[]}。',
+      },
+      {
+        role: "user",
+        content: `事件：${eventTitle}\n\n已有时间线：\n${JSON.stringify((arc.timeline || []).slice(0, 16)).slice(0, 4000)}\n\n已有国家立场：\n${JSON.stringify((arc.countryOrActorAttitudes || []).slice(0, 12)).slice(0, 4000)}\n\n外搜标题线索：\n${JSON.stringify(hits)}\n\n请补充 2–6 个 ai_supplement 脉络节点，并加强各国 rationale/drivers/supplementNote。`,
+      },
+    ], 2200, 0.25, current);
+    const parsed = parseJsonLoose(raw) as Partial<ComparisonResult> | null;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (Array.isArray(parsed.timeline)) {
+      parsed.timeline = parsed.timeline.map((t) => ({
+        ...t,
+        kind: "ai_supplement" as const,
+        confidence: Math.min(0.65, Number(t.confidence) || 0.5),
+        source: t.source || "AI外搜补充",
+      }));
+    }
+    if (Array.isArray(parsed.countryOrActorAttitudes)) {
+      parsed.countryOrActorAttitudes = parsed.countryOrActorAttitudes.map((a) => ({
+        ...a,
+        supplementNote: a.supplementNote || "含外搜标题线索的分析补充",
+      }));
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 async function compareCluster(id: number, forceHeuristic: boolean) {
   const cluster = get<Row>("select * from clusters where id = ?", [id]);
   if (!cluster) return { status: 404, body: { error: "事件不存在" } };
-  const members = all<Row>(`select a.id, a.title, a.content, a.rss_summary as rssSummary, a.published_at as publishedAt, f.title as feedTitle from articles a join feeds f on f.id = a.feed_id where a.cluster_id = ? order by coalesce(a.published_at, a.created_at) limit 8`, [id]);
-  if (members.length < 2) return { status: 422, body: { error: "至少需要 2 篇文章才能对比" } };
+  const members = all<Row>(`select a.id, a.feed_id as feedId, a.title, a.content, a.rss_summary as rssSummary, a.published_at as publishedAt, f.title as feedTitle from articles a join feeds f on f.id = a.feed_id where a.cluster_id = ? order by coalesce(a.published_at, a.created_at)`, [id]);
+  const cross = selectCrossFeedArticlesForCompare(
+    members.map((m) => ({
+      id: Number(m.id),
+      feedId: Number(m.feedId),
+      feedTitle: String(m.feedTitle),
+      title: String(m.title),
+      body: String(m.content || m.rssSummary || ""),
+      publishedAt: m.publishedAt as string | null,
+    })),
+  );
+  if (new Set(cross.map((m) => m.feedId)).size < 2) {
+    return { status: 422, body: { error: "需要至少两个不同来源才能对比（同源多报道不对比）" } };
+  }
   const current = await settingsResolved();
-  let comparison;
+  let comparison = buildLayer0ForEvent(String(cluster.title), cross);
   if (llmReady(current) && !forceHeuristic) {
-    const docs = members.map((item, index) => `【来源${index + 1}】媒体：${item.feedTitle}｜文章ID：${item.id}｜时间：${item.publishedAt || "未知"}\n标题：${item.title}\n正文：${strip(String(item.content || item.rssSummary || "")).slice(0, 2500)}`).join("\n\n---\n\n");
-    const parsed = parseJsonLoose(await chat([
-      { role: "system", content: "你是资深媒体分析师，擅长对同一事件的多源报道做对比分析。只输出 JSON。" },
-      { role: "user", content: `事件：${cluster.title}\n\n以下是${members.length}个来源的报道。输出严格 JSON：{"overallSummary":"200字内总览","consensus":["共识事实"],"divergences":[{"aspect":"分歧维度","description":"差异"}],"timeline":[{"time":"时间","event":"事件","source":"媒体"}],"sources":[{"articleId":数字,"stanceScore":-1到1,"stanceLabel":"立场","narrative":"叙述框架","tone":"语气","keyPoints":["论点"],"uniqueInfo":["独有信息"],"framingWords":["倾向词"]}]}\n\n${docs}` },
-    ], 2500, 0.2, current));
-    const byId = new Map(members.map((item) => [Number(item.id), item]));
-    comparison = {
-      overallSummary: parsed.overallSummary || "", consensus: parsed.consensus || [], divergences: parsed.divergences || [], timeline: parsed.timeline || [],
-      sources: (Array.isArray(parsed.sources) ? parsed.sources : []).map((item: Record<string, unknown>) => {
-        const src = byId.get(Number(item.articleId));
-        return src ? { articleId: Number(item.articleId), feedTitle: src.feedTitle, title: src.title, stanceScore: Math.max(-1, Math.min(1, Number(item.stanceScore) || 0)), stanceLabel: item.stanceLabel || "中立", narrative: item.narrative || "", tone: item.tone || "", keyPoints: Array.isArray(item.keyPoints) ? item.keyPoints.slice(0, 5) : [], uniqueInfo: Array.isArray(item.uniqueInfo) ? item.uniqueInfo.slice(0, 4) : [], framingWords: Array.isArray(item.framingWords) ? item.framingWords.slice(0, 6) : [], publishedAt: src.publishedAt || null } : null;
-      }).filter(Boolean),
-      generatedBy: "llm", model: current.llmModel,
-    };
-  } else {
-    comparison = {
-      overallSummary: `共 ${members.length} 个来源报道「${cluster.title}」。当前未使用大模型。`, consensus: [], divergences: [], timeline: [],
-      sources: members.map((item) => ({ articleId: item.id, feedTitle: item.feedTitle, title: item.title, stanceScore: 0, stanceLabel: "未评估", narrative: item.title, tone: "平实陈述", keyPoints: [], uniqueInfo: [], framingWords: [], publishedAt: item.publishedAt })),
-      generatedBy: "heuristic",
-    };
+    try {
+      const BATCH = 4;
+      const parts: Partial<ComparisonResult>[] = [];
+      const prior = JSON.stringify({
+        consensus: comparison.consensus.slice(0, 4),
+        countryOrActorAttitudes: (comparison.countryOrActorAttitudes || []).slice(0, 6),
+        sources: comparison.sources.map((s) => ({
+          articleId: s.articleId,
+          attitude: s.attitude,
+          stanceLabel: s.stanceLabel,
+        })),
+      });
+      for (let i = 0; i < cross.length; i += BATCH) {
+        const batch = cross.slice(i, i + BATCH);
+        const docs = batch.map((item, index) =>
+          `【来源${index + 1}】媒体：${item.feedTitle}｜文章ID：${item.id}｜时间：${item.publishedAt || "未知"}\n标题：${item.title}\n正文：\n${strip(item.body)}`,
+        ).join("\n\n---\n\n");
+        const parsed = parseJsonLoose(await chat([
+          { role: "system", content: "你是资深媒体与地缘政治分析师。基于同一事件完整正文做多源对比，形成详实态度与时间线脉络。态度只用：中立/客观/主观/积极/消极。对国家/行为体必须写清 summary 与 rationale（为什么是该态度），并给出 drivers 与 evidenceQuotes。允许在标明 supplementNote 的前提下补全背景因果，禁止捏造正文未出现的具体数字/日期/引语。只输出 JSON。" },
+          { role: "user", content: `事件：${cluster.title}\n先验：${prior}\n\n输出 JSON：${ARC_JSON_SHAPE}\n\n${docs}` },
+        ], 4500, 0.2, current)) as Partial<ComparisonResult>;
+        if (parsed && typeof parsed === "object") {
+          // Ensure batch sources reference known article ids when model returns them
+          if (Array.isArray(parsed.sources)) {
+            parsed.sources = parsed.sources.filter((s) =>
+              batch.some((b) => Number(b.id) === Number(s.articleId)),
+            );
+          }
+          parts.push({ ...parsed, generatedBy: "llm" });
+        }
+      }
+      if (parts.length) {
+        comparison = mergeArcPartials(comparison, parts);
+        if (parts.length > 1) {
+          try {
+            const mergedRaw = parseJsonLoose(await chat([
+              {
+                role: "system",
+                content: "你负责把同一事件多批次对比结果归并为单一脉络体系 JSON。保留 summary/rationale/drivers/evidenceQuotes/detail/impact 等详实字段。不要编造新事实。只输出 JSON。",
+              },
+              {
+                role: "user",
+                content: `事件：${cluster.title}\n归并以下局部结果为完整脉络：\n${ARC_JSON_SHAPE}\n\n${JSON.stringify(parts).slice(0, 12000)}`,
+              },
+            ], 3500, 0.1, current)) as Partial<ComparisonResult>;
+            if (mergedRaw && typeof mergedRaw === "object") {
+              comparison = mergeArcPartials(comparison, [mergedRaw]);
+            }
+          } catch { /* keep merged batches */ }
+        }
+        const extra = await enrichArcWithExternalNewsMobile(String(cluster.title), comparison, current);
+        if (extra) comparison = mergeArcPartials(comparison, [extra]);
+        comparison.generatedBy = "llm";
+        comparison.model = current.llmModel;
+        // Every cross-feed article must appear in sources
+        for (const a of cross) {
+          if (!comparison.sources.some((s) => s.articleId === a.id)) {
+            const hit = buildLayer0ForEvent(String(cluster.title), [a]).sources[0];
+            if (hit) comparison.sources.push(hit);
+          }
+        }
+      }
+    } catch { /* keep Layer0 */ }
   }
   run("update clusters set comparison = ?, comparison_source = ?, compared_at = ? where id = ?", [JSON.stringify(comparison), comparison.generatedBy, nowIso(), id]);
   for (const source of comparison.sources) run("update articles set stance_score = ? where id = ?", [Number(source.stanceScore) || 0, Number(source.articleId)]);
@@ -849,6 +1359,7 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
     }
     if (method === "DELETE" && path === "/api/feeds") {
       const id = Number(url.searchParams.get("id"));
+      deleteArticlesFtsForFeed(id);
       run("delete from articles where feed_id = ?", [id]);
       run("delete from feeds where id = ?", [id]);
       return json(200, { ok: true });
@@ -932,7 +1443,12 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
       if (!article) return json(404, { error: "文章不存在" });
       return json(200, { article });
     }
-    if (articleMatch && method === "DELETE") { run("delete from articles where id = ?", [Number(articleMatch[1])]); return json(200, { ok: true }); }
+    if (articleMatch && method === "DELETE") {
+      const id = Number(articleMatch[1]);
+      deleteArticleFtsRow(id);
+      run("delete from articles where id = ?", [id]);
+      return json(200, { ok: true });
+    }
     const clusterArticleMatch = path.match(/^\/api\/articles\/(\d+)\/cluster$/);
     if (clusterArticleMatch && method === "POST") {
       const result = analyzeArticleCluster(Number(clusterArticleMatch[1]));
@@ -1046,7 +1562,11 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
           const packed = { title: String(article.title || ""), content: String(article.content || article.rss_summary || ""), author: String(article.author || "") };
           const matched = rules.find((rule) => (!rule.feed_id || Number(rule.feed_id) === Number(article.feed_id)) && ruleHit(rule, packed));
           if (!matched) continue;
-          if (matched.action === "block") { run("delete from articles where id = ?", [Number(article.id)]); blocked += 1; }
+          if (matched.action === "block") {
+            deleteArticleFtsRow(Number(article.id));
+            run("delete from articles where id = ?", [Number(article.id)]);
+            blocked += 1;
+          }
           else if (matched.action === "star") { run("update articles set is_starred = 1 where id = ?", [Number(article.id)]); starred += 1; }
           else if (matched.action === "archive") { run("update articles set is_archived = 1, archived_at = ? where id = ?", [nowIso(), Number(article.id)]); archived += 1; }
           else if (matched.action === "mark_read") { run("update articles set is_read = 1, read_at = ? where id = ?", [nowIso(), Number(article.id)]); markedRead += 1; }
@@ -1113,7 +1633,23 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
       });
     }
     if (path === "/api/clusters" && method === "GET") {
-      return json(200, { clusters: all<Row>("select * from clusters where article_count >= 2 order by last_seen_at desc limit 100").map(clusterView) });
+      const search = (url.searchParams.get("search") || "").trim();
+      const raw = all<Row>("select * from clusters where article_count >= 2 order by last_seen_at desc limit 100").map(clusterView);
+      if (!search) return json(200, { clusters: raw, total: raw.length });
+      const ranked = rankClustersByQuery(
+        search,
+        raw.map((c) => ({
+          ...c,
+          id: Number(c.id),
+          title: String(c.title || ""),
+          memberTitles: (c.members || []).map((m: { title?: string }) => String(m.title || "")),
+          lastSeenAt: (c.lastSeenAt as string | null) ?? null,
+        })),
+      );
+      return json(200, {
+        clusters: ranked.map(({ memberTitles: _mt, ...rest }) => rest),
+        total: ranked.length,
+      });
     }
     if (path === "/api/stats" && method === "GET") {
       const days = Math.min(60, Math.max(1, Number(url.searchParams.get("days")) || 14));
@@ -1187,6 +1723,9 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
       const saved = await saveSettings(patch);
       return json(200, { settings: mask(saved) });
     }
+    if (path === "/api/search/aggregate" && method === "GET") {
+      return json(200, await searchAggregate(url.searchParams));
+    }
     if (path === "/api/settings" && method === "POST") {
       const body = await readBody(init);
       if (body.testProxy) return json(200, { ok: false, error: "手机直接联网，不使用电脑上的代理", latencyMs: 0 });
@@ -1204,7 +1743,7 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
       const logs = all<Row>("select feed_title as feedTitle, status, message, created_at as createdAt from fetch_logs order by id desc limit 30");
       return json(200, {
         schemaVersion: getSchemaVersion(),
-        appVersion: "0.2.0",
+        appVersion: APP_VERSION,
         feeds: Number(get<{ n: number }>("select count(*) as n from feeds")?.n || 0),
         articles: Number(get<{ n: number }>("select count(*) as n from articles")?.n || 0),
         recentLogs: logs,
@@ -1243,6 +1782,7 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
       const bytes = new Uint8Array(raw.length);
       for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
       await replaceDatabase(bytes);
+      try { rebuildAllArticleFts(); } catch { /* ignore */ }
       return json(200, { ok: true, mode: "replace", schemaVersion: getSchemaVersion() });
     }
     if (path === "/api/opml" && method === "GET") {
@@ -1319,6 +1859,11 @@ export async function handleApi(url: URL, init?: RequestInit): Promise<Response>
 export async function installLocalApi(rawFetch: typeof window.fetch) {
   setRawFetch(rawFetch);
   await openDatabase();
+  try {
+    rebuildAllArticleFts();
+  } catch {
+    /* FTS optional on first boot */
+  }
   const seededRev = get<{ value: string }>("select value from settings where key = 'catalogRev'")?.value || "";
   if (!get("select value from settings where key = 'catalogSeeded'") || seededRev !== CATALOG_REV) {
     for (const feed of CATALOG) {

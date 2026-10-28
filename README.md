@@ -12,7 +12,7 @@
 |:--|:--|
 | **安装包** | [Releases · 最新 APK](https://github.com/skyline019/Conflux-RSS/releases/latest) |
 | **文档** | [用户指南](./mobile/docs/USER_GUIDE.md) · [架构](./mobile/docs/ARCHITECTURE.md) · [作品说明](./mobile/docs/PORTFOLIO.md) |
-| **当前版本** | **0.2.3** · `app.conflux.mobile` · versionCode **5** |
+| **当前版本** | **0.2.5** · `app.conflux.mobile` · versionCode **6** |
 
 ---
 
@@ -22,6 +22,7 @@
 - **阅读** — 进度记忆、「未读完」、系统分享、应用内打开原文  
 - **全文 / 媒体** — 自动或按需抓全文；YouTube / B 站专项  
 - **可选 LLM** — OpenAI 兼容流式摘要与文内提问（Key 存 Preferences）  
+- **智能搜索聚合** — 库内 FTS + 真实事件向融合排序 + 同事件扩展；可选与总结共用大模型做静默改写/精排；「全网相关」外站分区展示  
 - **后台刷新** — WorkManager + 前台服务；通知显示进度 / 完成；HTTP 304 跳过未变源  
 - **备份** — sqlite / OPML / 诊断导出导入  
 - **默认安全** — 禁明文 HTTP、签名 Release、侧载自用  

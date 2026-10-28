@@ -76,6 +76,8 @@ export const articles = pgTable("articles", {
   }[]>().notNull().default([]),
   wordCount: integer("word_count").notNull().default(0),
   keywords: jsonb("keywords").$type<string[]>().notNull().default([]),
+  /** Space-separated CN/EN tokens for simple FTS (maintained by ingest/fulltext/AI). */
+  searchDocument: text("search_document"),
   // AI
   aiSummary: text("ai_summary"),
   aiKeyPoints: jsonb("ai_key_points").$type<string[] | null>(),
@@ -99,6 +101,8 @@ export const articles = pgTable("articles", {
   index("articles_published_idx").on(t.publishedAt),
   index("articles_title_norm_idx").on(t.titleNorm),
 ]);
+
+/* search_document GIN index created in ensureRuntimeSchema / drizzle/0001_search_document.sql */
 
 /* ---------------- Duplicate log (dedup audit) ---------------- */
 export const duplicates = pgTable("duplicates", {

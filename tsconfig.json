@@ -17,7 +17,7 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
-    "baseUrl": ".",
+    "tsBuildInfoFile": ".next/cache/tsconfig.tsbuildinfo",
     "paths": {
       "@/*": [
         "./src/*"
@@ -31,14 +31,18 @@
   },
   "include": [
     "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "next.config.ts",
+    "drizzle.config.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
     "desktop",
-    "mobile"
+    "mobile",
+    "scripts",
+    "dist"
   ]
 }

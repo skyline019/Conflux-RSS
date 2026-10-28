@@ -14,6 +14,7 @@ import { assignToCluster } from "./cluster";
 import { summarizeArticle } from "./llm";
 import { mapPool } from "./pool";
 import { ensureRuntimeSchema } from "./ensure-schema";
+import { refreshSearchDocument } from "./refreshSearchDocument";
 
 export interface RefreshResult {
   feedId: number;
@@ -196,6 +197,7 @@ export async function refreshFeed(feedId: number): Promise<RefreshResult> {
       const newId = inserted[0].id;
       newIds.push(newId);
       base.added++;
+      await refreshSearchDocument(newId).catch(() => null);
       // make it visible to subsequent dedup checks within this batch
       const lite: RecentLite = { id: newId, title: item.title, titleNorm: tNorm, canonicalHash: cHash, contentHash: cHashBody, simhash: sh, guid: item.guid, feedId };
       recent.unshift(lite); byHash.set(cHash, lite); if (tNorm) byTitleNorm.set(tNorm, lite);
@@ -369,6 +371,7 @@ export async function fetchAndStoreFullText(articleId: number): Promise<boolean>
       keywords: extractKeywords(a.title, ft.text, 10),
       stanceScore: stanceHeuristic(a.title + "。" + ft.text).score,
     }).where(eq(articles.id, articleId));
+    await refreshSearchDocument(articleId).catch(() => null);
     return true;
   } catch {
     const strictTopic = /baidu\.com\/s\?|top\.baidu\.com|news\.google\.com\/(?:rss\/)?articles\//i.test(a.link);
@@ -449,6 +452,7 @@ export async function summarizeAndStore(articleId: number) {
     aiAt: new Date(),
     ...(result.keywords.length ? { keywords: result.keywords } : {}),
   }).where(eq(articles.id, articleId));
+  await refreshSearchDocument(articleId).catch(() => null);
   return result;
 }
 

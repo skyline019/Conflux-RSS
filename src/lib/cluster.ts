@@ -1,19 +1,17 @@
 import { db } from "@/db";
 import { articles, clusters } from "@/db/schema";
-import { eq, desc, gte, sql, inArray } from "drizzle-orm";
+import { eq, desc, sql, inArray, and, ne } from "drizzle-orm";
 import { titleSimilarity, extractKeywords, extractEntities, stanceHeuristic } from "./text";
 import { getSettings } from "./app-settings";
+import {
+  buildCandidatePairs,
+  buildSignature,
+  decodeSignature,
+  encodeSignature,
+  signatureOverlap,
+  type BlockDoc,
+} from "./clusterBlocking";
 
-interface ClusterCandidate {
-  id: number;
-  title: string;
-  keywords: string[];
-  publishedAt: Date | null;
-  clusterId: number | null;
-  feedId: number;
-}
-
-/** IDF-style weights: rare keywords (e.g. a product name) count far more than generic ones. */
 export function computeIdfWeights(docs: { keywords: string[] }[]): Map<string, number> {
   const df = new Map<string, number>();
   for (const d of docs) {
@@ -23,6 +21,15 @@ export function computeIdfWeights(docs: { keywords: string[] }[]): Map<string, n
   const n = Math.max(1, docs.length);
   df.forEach((c, k) => weights.set(k, Math.log(1 + n / c)));
   return weights;
+}
+
+interface ClusterCandidate {
+  id: number;
+  title: string;
+  keywords: string[];
+  publishedAt: Date | null;
+  clusterId: number | null;
+  feedId: number;
 }
 
 function keywordOverlapWeighted(a: string[], b: string[], weights?: Map<string, number>): number {
@@ -76,53 +83,112 @@ export async function refreshClusterStats(clusterId: number) {
     await db.delete(clusters).where(eq(clusters.id, clusterId));
     return;
   }
-  // merge top keywords across member articles
-  const members = await db.select({ keywords: articles.keywords, title: articles.title })
-    .from(articles).where(eq(articles.clusterId, clusterId)).limit(30);
-  const freq = new Map<string, number>();
-  members.forEach((m) => (m.keywords || []).forEach((k) => freq.set(k, (freq.get(k) || 0) + 1)));
-  const kws = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k]) => k);
-  // canonical title = shortest reasonably-informative title
+  if (r.sources < 2) {
+    // hard gate: not a multi-source event — dissolve
+    await db.update(articles).set({ clusterId: null }).where(eq(articles.clusterId, clusterId));
+    await db.delete(clusters).where(eq(clusters.id, clusterId));
+    return;
+  }
+  const members = await db.select({
+    keywords: articles.keywords,
+    title: articles.title,
+    feedId: articles.feedId,
+    publishedAt: articles.publishedAt,
+    createdAt: articles.createdAt,
+  }).from(articles).where(eq(articles.clusterId, clusterId)).limit(80);
+  const idf = computeIdfWeights(members.map((m) => ({ keywords: m.keywords || [] })));
+  const sig = buildSignature(
+    members.map((m) => ({
+      keywords: m.keywords || [],
+      title: m.title,
+      feedId: m.feedId,
+      timeMs: new Date(m.publishedAt || m.createdAt).getTime(),
+    })),
+    idf,
+  );
   const bestTitle = members.map((m) => m.title).sort((a, b) => Math.abs(a.length - 26) - Math.abs(b.length - 26))[0];
   await db.update(clusters).set({
     articleCount: r.count,
     sourceCount: r.sources,
     firstSeenAt: r.first ? new Date(r.first) : null,
     lastSeenAt: r.last ? new Date(r.last) : null,
-    keywords: kws,
+    keywords: encodeSignature(sig),
     ...(bestTitle ? { title: bestTitle } : {}),
     updatedAt: new Date(),
   }).where(eq(clusters.id, clusterId));
 }
 
 /**
- * Assign one article to an event cluster:
- * find the most similar recent article from a *different* angle (any feed),
- * join its cluster or create a new one with both.
+ * Assign one article to an event cluster (incremental):
+ * cross-feed only; prefer signature coarse match then eventSimilarity.
  */
 export async function assignToCluster(articleId: number): Promise<number | null> {
   const s = await getSettings();
   const [me] = await db.select().from(articles).where(eq(articles.id, articleId)).limit(1);
   if (!me) return null;
-  const since = new Date(Date.now() - s.clusterWindowHours * 3600 * 1000);
-  const recent = await db.select({
+  const meC: ClusterCandidate = {
+    id: me.id, title: me.title, keywords: me.keywords || [],
+    publishedAt: me.publishedAt, clusterId: me.clusterId, feedId: me.feedId,
+  };
+  const meTime = new Date(me.publishedAt || me.createdAt).getTime();
+  const windowMs = s.clusterWindowHours * 2 * 3600 * 1000;
+
+  // Signature coarse filter against recent clusters
+  const recentClusters = await db.select().from(clusters)
+    .orderBy(desc(clusters.lastSeenAt)).limit(120);
+  const sigHits: { clusterId: number; overlap: number }[] = [];
+  for (const c of recentClusters) {
+    const sig = decodeSignature(c.keywords);
+    if (!sig) continue;
+    const ov = signatureOverlap(me.title, me.keywords || [], me.feedId, meTime, sig, windowMs);
+    if (ov >= 0.22) sigHits.push({ clusterId: c.id, overlap: ov });
+  }
+  sigHits.sort((a, b) => b.overlap - a.overlap);
+
+  const candidateClusterIds = sigHits.slice(0, 8).map((h) => h.clusterId);
+  let pool = await db.select({
     id: articles.id, title: articles.title, keywords: articles.keywords,
     publishedAt: articles.publishedAt, clusterId: articles.clusterId, feedId: articles.feedId,
+    createdAt: articles.createdAt,
   }).from(articles)
-    .where(gte(articles.createdAt, since))
+    .where(and(ne(articles.feedId, me.feedId), ne(articles.id, me.id)))
     .orderBy(desc(articles.createdAt))
-    .limit(400);
+    .limit(500);
 
-  const meC: ClusterCandidate = { id: me.id, title: me.title, keywords: me.keywords || [], publishedAt: me.publishedAt, clusterId: me.clusterId, feedId: me.feedId };
-  const weights = computeIdfWeights(recent.map((r) => ({ keywords: r.keywords || [] })));
-  const meTime = new Date(me.publishedAt || me.createdAt).getTime();
-  let best: ClusterCandidate | null = null;
+  if (candidateClusterIds.length) {
+    const focused = await db.select({
+      id: articles.id, title: articles.title, keywords: articles.keywords,
+      publishedAt: articles.publishedAt, clusterId: articles.clusterId, feedId: articles.feedId,
+      createdAt: articles.createdAt,
+    }).from(articles).where(inArray(articles.clusterId, candidateClusterIds)).limit(200);
+    const seen = new Set(pool.map((p) => p.id));
+    for (const row of focused) {
+      if (!seen.has(row.id) && row.feedId !== me.feedId) pool.push(row);
+    }
+  }
+
+  const weights = computeIdfWeights([
+    { keywords: me.keywords || [] },
+    ...pool.map((r) => ({ keywords: r.keywords || [] })),
+  ]);
+
+  let best: typeof pool[number] | null = null;
   let bestScore = 0;
-  for (const other of recent) {
-    if (other.id === me.id) continue;
-    const hours = Math.abs(meTime - new Date(other.publishedAt || Date.now()).getTime()) / 3600000;
-    const score = eventSimilarity(meC, other, weights, hours, s.clusterWindowHours);
-    if (score > bestScore) { bestScore = score; best = other; }
+  for (const other of pool) {
+    if (other.feedId === me.feedId) continue;
+    const hours = Math.abs(meTime - new Date(other.publishedAt || other.createdAt).getTime()) / 3600000;
+    if (hours > s.clusterWindowHours * 2) continue;
+    const score = eventSimilarity(
+      meC,
+      { ...other, keywords: other.keywords || [], clusterId: other.clusterId },
+      weights,
+      hours,
+      s.clusterWindowHours,
+    );
+    if (score > bestScore) {
+      bestScore = score;
+      best = other;
+    }
   }
 
   if (!best || bestScore < s.clusterThreshold) return me.clusterId;
@@ -134,7 +200,7 @@ export async function assignToCluster(articleId: number): Promise<number | null>
     }
     return best.clusterId;
   }
-  // create new cluster from the pair
+
   const [created] = await db.insert(clusters).values({
     title: best.title.length <= me.title.length ? best.title : me.title,
     keywords: me.keywords || [],
@@ -144,14 +210,16 @@ export async function assignToCluster(articleId: number): Promise<number | null>
   return created.id;
 }
 
-/** Rebuild all clusters from scratch with union-find (transitive same-event groups). */
+/** Rebuild all clusters from full corpus with entity-inverted candidates + union-find. */
 export async function rebuildClusters(
   onProgress?: (ev: { phase: string; done: number; total: number }) => void,
 ): Promise<{ clusters: number; assigned: number }> {
   const s = await getSettings();
 
-  const toHeal = await db.select({ id: articles.id, title: articles.title, content: articles.content, rssSummary: articles.rssSummary })
-    .from(articles).orderBy(desc(articles.createdAt)).limit(800);
+  // Full corpus heal from real body (content || rssSummary — never aiSummary)
+  const toHeal = await db.select({
+    id: articles.id, title: articles.title, content: articles.content, rssSummary: articles.rssSummary,
+  }).from(articles).orderBy(desc(articles.createdAt));
   for (let i = 0; i < toHeal.length; i++) {
     const a = toHeal[i];
     const body = a.content || a.rssSummary || "";
@@ -166,35 +234,54 @@ export async function rebuildClusters(
   await db.update(articles).set({ clusterId: null });
   await db.delete(clusters);
 
-  const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
   const all = await db.select({
     id: articles.id, title: articles.title, keywords: articles.keywords,
     publishedAt: articles.publishedAt, feedId: articles.feedId, createdAt: articles.createdAt,
-  }).from(articles).where(gte(articles.createdAt, since)).orderBy(desc(articles.createdAt)).limit(800);
+  }).from(articles).orderBy(desc(articles.createdAt));
+
   const weights = computeIdfWeights(all.map((a) => ({ keywords: a.keywords || [] })));
-  const cands = all.map((a) => ({ ...a, keywords: a.keywords || [], clusterId: null as number | null, createdAt: a.createdAt || new Date() }));
+  const cands = all.map((a, idx) => ({
+    ...a,
+    keywords: a.keywords || [],
+    clusterId: null as number | null,
+    createdAt: a.createdAt || new Date(),
+    idx,
+  }));
+
+  const docs: BlockDoc[] = cands.map((a, idx) => ({
+    id: a.id,
+    idx,
+    title: a.title,
+    keywords: a.keywords,
+    feedId: a.feedId,
+    timeMs: new Date(a.publishedAt || a.createdAt).getTime(),
+    entities: extractEntities(a.title),
+  }));
+
+  const windowMs = s.clusterWindowHours * 2 * 3600 * 1000;
+  const pairs = buildCandidatePairs(docs, weights, windowMs);
 
   const parent = cands.map((_, i) => i);
   const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
   const unite = (a: number, b: number) => {
-    const pa = find(a); const pb = find(b);
+    const pa = find(a);
+    const pb = find(b);
     if (pa !== pb) parent[pb] = pa;
   };
 
-  const NEIGHBORS = 36;
-  for (let i = 0; i < cands.length; i++) {
+  for (let pi = 0; pi < pairs.length; pi++) {
+    const [i, j] = pairs[pi];
     const a = cands[i];
-    const aTime = new Date(a.createdAt).getTime();
-    for (let j = i + 1; j < Math.min(cands.length, i + 1 + NEIGHBORS); j++) {
-      const b = cands[j];
-      const hours = Math.abs(aTime - new Date(b.createdAt).getTime()) / 3600000;
-      if (hours > s.clusterWindowHours * 2) continue;
-      const score = eventSimilarity(a, b, weights, hours, s.clusterWindowHours);
-      if (score >= s.clusterThreshold) unite(i, j);
-    }
-    if (i % 25 === 0) onProgress?.({ phase: "link", done: i, total: cands.length });
+    const b = cands[j];
+    if (a.feedId === b.feedId) continue;
+    const hours = Math.abs(
+      new Date(a.publishedAt || a.createdAt).getTime() - new Date(b.publishedAt || b.createdAt).getTime(),
+    ) / 3600000;
+    const score = eventSimilarity(a, b, weights, hours, s.clusterWindowHours);
+    if (score >= s.clusterThreshold) unite(i, j);
+    if (pi % 200 === 0) onProgress?.({ phase: "link", done: pi, total: Math.max(1, pairs.length) });
   }
-  onProgress?.({ phase: "link", done: cands.length, total: cands.length });
+  onProgress?.({ phase: "link", done: pairs.length, total: Math.max(1, pairs.length) });
 
   const groups = new Map<number, typeof cands>();
   cands.forEach((c, i) => {
@@ -204,14 +291,18 @@ export async function rebuildClusters(
     groups.set(root, arr);
   });
 
-  let created = 0, assigned = 0;
+  let created = 0;
+  let assigned = 0;
   const buckets = [...groups.values()];
   for (let bi = 0; bi < buckets.length; bi++) {
     const members = buckets[bi];
     if (members.length < 2) continue;
     const distinctFeeds = new Set(members.map((m) => m.feedId)).size;
-    if (distinctFeeds < 2 && members.length < 4) continue;
-    const [c] = await db.insert(clusters).values({ title: members[0].title, keywords: members[0].keywords }).returning({ id: clusters.id });
+    if (distinctFeeds < 2) continue; // hard: multi-source only
+    const [c] = await db.insert(clusters).values({
+      title: members[0].title,
+      keywords: members[0].keywords,
+    }).returning({ id: clusters.id });
     created++;
     for (const m of members) {
       await db.update(articles).set({ clusterId: c.id }).where(eq(articles.id, m.id));
@@ -225,8 +316,7 @@ export async function rebuildClusters(
 }
 
 /**
- * Global cluster analysis for one open article: score it against the recent corpus
- * (not only the local greedy neighbor) and join or create an event.
+ * Global cluster analysis for one open article (cross-feed only).
  */
 export async function analyzeArticleCluster(articleId: number): Promise<{
   clusterId: number | null;
@@ -235,18 +325,20 @@ export async function analyzeArticleCluster(articleId: number): Promise<{
   const s = await getSettings();
   const [me] = await db.select().from(articles).where(eq(articles.id, articleId)).limit(1);
   if (!me) return { clusterId: null, matches: [] };
-  const since = new Date(Date.now() - Math.max(s.clusterWindowHours, 24 * 14) * 3600 * 1000);
   const recent = await db.select({
     id: articles.id, title: articles.title, keywords: articles.keywords,
     publishedAt: articles.publishedAt, clusterId: articles.clusterId, feedId: articles.feedId, createdAt: articles.createdAt,
-  }).from(articles).where(gte(articles.createdAt, since)).orderBy(desc(articles.createdAt)).limit(1200);
+  }).from(articles).orderBy(desc(articles.createdAt)).limit(2000);
 
-  const meC: ClusterCandidate = { id: me.id, title: me.title, keywords: me.keywords || [], publishedAt: me.publishedAt, clusterId: me.clusterId, feedId: me.feedId };
+  const meC: ClusterCandidate = {
+    id: me.id, title: me.title, keywords: me.keywords || [],
+    publishedAt: me.publishedAt, clusterId: me.clusterId, feedId: me.feedId,
+  };
   const weights = computeIdfWeights(recent.map((r) => ({ keywords: r.keywords || [] })));
   const meTime = new Date(me.publishedAt || me.createdAt).getTime();
   const hits: { row: typeof recent[number]; score: number }[] = [];
   for (const other of recent) {
-    if (other.id === me.id) continue;
+    if (other.id === me.id || other.feedId === me.feedId) continue;
     const hours = Math.abs(meTime - new Date(other.publishedAt || other.createdAt).getTime()) / 3600000;
     if (hours > s.clusterWindowHours * 2) continue;
     const score = eventSimilarity(
@@ -260,7 +352,10 @@ export async function analyzeArticleCluster(articleId: number): Promise<{
   }
   hits.sort((a, b) => b.score - a.score);
   const top = hits.slice(0, 12);
-  const matches = top.map((h) => ({ id: h.row.id, title: h.row.title, feedId: h.row.feedId, score: Math.round(h.score * 1000) / 1000 }));
+  const matches = top.map((h) => ({
+    id: h.row.id, title: h.row.title, feedId: h.row.feedId,
+    score: Math.round(h.score * 1000) / 1000,
+  }));
   if (!top.length) return { clusterId: me.clusterId, matches };
 
   const host = top.find((h) => h.row.clusterId)?.row.clusterId || null;

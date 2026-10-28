@@ -34,7 +34,7 @@ public class RefreshForegroundService extends Service {
     public void onCreate() {
         super.onCreate();
         instance = this;
-        ensureChannel();
+        ensureChannel(this);
     }
 
     @Override
@@ -44,7 +44,7 @@ public class RefreshForegroundService extends Service {
             return START_NOT_STICKY;
         }
 
-        Notification notification = buildNotification("汇阅", "正在后台刷新订阅…", 0, 0, true);
+        Notification notification = buildNotification(this, "汇阅", "正在后台刷新订阅…", 0, 0, true, 0);
         if (Build.VERSION.SDK_INT >= 29) {
             ServiceCompat.startForeground(
                 this,
@@ -56,7 +56,6 @@ public class RefreshForegroundService extends Service {
             startForeground(NOTIF_ID, notification);
         }
 
-        // Only kick WebView when WorkManager set EXTRA_KICK_JS — JS startProgress must not re-dispatch
         boolean kickJs = intent != null && intent.getBooleanExtra(EXTRA_KICK_JS, false);
         if (kickJs) {
             kickWebViewForRefresh();
@@ -65,10 +64,6 @@ public class RefreshForegroundService extends Service {
         return START_STICKY;
     }
 
-    /**
-     * Prefer soft dispatch if MainActivity/WebView already alive (no launch flash).
-     * Else try startActivity; if OEM blocks it, ongoing notification tap still carries backgroundRefresh.
-     */
     private void kickWebViewForRefresh() {
         if (MainActivity.requestBackgroundRefreshIfAlive()) {
             return;
@@ -80,10 +75,9 @@ public class RefreshForegroundService extends Service {
         try {
             startActivity(launch);
         } catch (Exception ignored) {
-            // Android 10+ background activity limits — user can tap the ongoing notification
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm != null) {
-                nm.notify(NOTIF_ID, buildNotification("汇阅 · 等待刷新", "点按通知以继续后台抓取", 0, 0, true));
+                nm.notify(NOTIF_ID, buildNotification(this, "汇阅 · 等待刷新", "点按通知以继续后台抓取", 0, 0, true, 0));
             }
         }
     }
@@ -91,23 +85,26 @@ public class RefreshForegroundService extends Service {
     public void updateProgress(String title, String text, int progress, int max) {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
-        nm.notify(NOTIF_ID, buildNotification(title, text, progress, max, true));
+        nm.notify(NOTIF_ID, buildNotification(this, title, text, progress, max, true, 0));
     }
 
-    public void showCompleted(String title, String text) {
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (nm != null) {
-            nm.notify(NOTIF_ID + 1, buildNotification(title, text, 0, 0, false));
-        }
+    public void showCompleted(String title, String text, int added) {
+        postDoneNotification(this, title, text, added, false);
         stopSelfSafely();
     }
 
     public void showFailed(String text) {
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (nm != null) {
-            nm.notify(NOTIF_ID + 1, buildNotification("汇阅 · 刷新失败", text, 0, 0, false));
-        }
+        postDoneNotification(this, "汇阅 · 刷新失败", text, 0, true);
         stopSelfSafely();
+    }
+
+    /** Post done/fail even if the FGS instance is already gone. */
+    public static void postDoneNotification(Context ctx, String title, String text, int added, boolean failed) {
+        Context app = ctx.getApplicationContext();
+        ensureChannel(app);
+        NotificationManager nm = (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+        nm.notify(NOTIF_ID + 1, buildNotification(app, title, text, 0, 0, false, failed ? 0 : Math.max(0, added)));
     }
 
     private void stopSelfSafely() {
@@ -120,9 +117,9 @@ public class RefreshForegroundService extends Service {
 
     public static final String CHANNEL_DONE_ID = "conflux_refresh_done";
 
-    private void ensureChannel() {
+    private static void ensureChannel(Context ctx) {
         if (Build.VERSION.SDK_INT < 26) return;
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
         NotificationChannel progress = new NotificationChannel(
             CHANNEL_ID,
@@ -139,26 +136,34 @@ public class RefreshForegroundService extends Service {
             NotificationManager.IMPORTANCE_DEFAULT
         );
         done.setDescription("后台刷新完成或失败时提醒");
+        done.setShowBadge(true);
         nm.createNotificationChannel(done);
     }
 
-    private Notification buildNotification(String title, String text, int progress, int max, boolean ongoing) {
-        Intent open = new Intent(this, MainActivity.class);
+    private static Notification buildNotification(
+        Context ctx,
+        String title,
+        String text,
+        int progress,
+        int max,
+        boolean ongoing,
+        int badgeNumber
+    ) {
+        Intent open = new Intent(ctx, MainActivity.class);
         open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-        // Fallback when startActivity from FGS is blocked: tapping continues the JS refresh path
         if (ongoing) {
             open.putExtra("backgroundRefresh", true);
             open.putExtra("silent", true);
         }
         PendingIntent pi = PendingIntent.getActivity(
-            this,
+            ctx,
             ongoing ? 1 : 2,
             open,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
         String channel = ongoing ? CHANNEL_ID : CHANNEL_DONE_ID;
-        NotificationCompat.Builder b = new NotificationCompat.Builder(this, channel)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, channel)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(R.mipmap.ic_launcher)
@@ -175,6 +180,10 @@ public class RefreshForegroundService extends Service {
         } else {
             b.setProgress(0, 0, false);
             b.setAutoCancel(true);
+            b.setStyle(new NotificationCompat.BigTextStyle().bigText(text));
+            if (badgeNumber > 0) {
+                b.setNumber(badgeNumber);
+            }
         }
         return b.build();
     }

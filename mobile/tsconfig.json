@@ -12,12 +12,18 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
     "paths": {
       "@/*": ["../src/*"]
-    },
-    "types": ["vite/client"]
+    }
   },
-  "include": ["main.tsx", "src", "vite.config.ts", "vitest.config.ts"],
+  "include": [
+    "main.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "package.json",
+    "vite.config.ts",
+    "vitest.config.ts"
+  ],
   "exclude": ["dist", "android", "node_modules"]
 }

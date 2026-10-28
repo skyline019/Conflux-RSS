@@ -5,6 +5,11 @@
     "checkJs": false,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/shims.d.ts"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "package.json"
+  ],
   "exclude": ["src/**/*.test.ts", "dist", "android", "node_modules"]
 }

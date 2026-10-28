@@ -3,6 +3,14 @@ import { Readability } from "@mozilla/readability";
 import { stripHtml, countWords, titleSimilarity, tokenize, extractEntities, normalizeTitle } from "./text";
 import { netFetch } from "./proxy";
 import {
+  searchNewsCandidateUrls as searchNewsCandidateUrlsCore,
+  searchNewsCandidates,
+  decodeGoogleNewsUrlCached,
+  isRejectNewsUrl,
+  type NewsSearchDeps,
+  type NewsSearchResult,
+} from "./newsSearch";
+import {
   type MediaItem,
   resolveAbsUrl,
   pickBestFromSrcset,
@@ -128,11 +136,6 @@ export async function decodeGoogleNewsUrl(gnUrl: string): Promise<string | null>
   return null;
 }
 
-interface NewsCandidate {
-  url: string;
-  titleHint?: string;
-}
-
 /** Distinctive anchors from a hot-search title: brands, numbers, 3+ CJK runs. */
 function distinctiveAnchors(title: string): string[] {
   const out: string[] = [];
@@ -232,167 +235,44 @@ export function passesTopicGate(
   return rel >= 0.18;
 }
 
-const REJECT_NEWS_HOST =
-  /baidu\.com|top\.baidu|google\.com|bing\.com|weibo\.com|zhihu\.com\/(question|people|pin)|bilibili\.com|douyin\.com|toutiao\.com\/video|ixigua\.com|tiktok\.com|kuaishou\.com|xiaohongshu\.com|taobao\.com|jd\.com|tmall\.com|so\.com\/s|sogou\.com/i;
-const PREFER_NEWS_HOST =
-  /chinanews\.com|xinhuanet\.com|news\.cn|people\.com\.cn|people\.cn|sina\.com\.cn|sohu\.com|thepaper\.cn|caixin\.com|qq\.com|163\.com|ifeng\.com|cctv\.com|gmw\.cn|youth\.cn|jiemian\.com|cls\.cn|yicai\.com|stcn\.com|eastmoney\.com|china\.com|baijiahao\.baidu\.com|mp\.weixin\.qq\.com|nytimes\.com|reuters\.com|bbc\.|dw\.com|theguardian\.com/i;
-
-function isRejectNewsUrl(u: string): boolean {
-  if (!/^https?:\/\//i.test(u)) return true;
-  if (REJECT_NEWS_HOST.test(u)) return true;
-  try {
-    const path = new URL(u).pathname.replace(/\/+$/, "") || "/";
-    // Bare homepages / channel indexes are not articles
-    if (path === "/" || /^\/(news|china|world|finance|sports|ent|tech|index)\/?$/i.test(path)) return true;
-  } catch {
-    return true;
-  }
-  return false;
-}
-
-function rankNewsCandidates(query: string, items: NewsCandidate[]): string[] {
-  const scored = items
-    .filter((c) => c.url && !isRejectNewsUrl(c.url))
-    .map((c) => {
-      const hintScore = c.titleHint ? topicRelevance(query, c.titleHint, "") : 0;
-      const hostBonus = PREFER_NEWS_HOST.test(c.url) ? 0.08 : 0;
-      return { url: c.url, score: hintScore + hostBonus, hint: c.titleHint || "" };
-    })
-    // Drop obvious title mismatches when we already have a search-result title hint
-    .filter((c) => !c.hint || c.score >= 0.18 || topicRelevance(query, c.hint, "") >= 0.18);
-
-  scored.sort((a, b) => b.score - a.score);
-  const out: string[] = [];
-  for (const s of scored) {
-    if (!out.includes(s.url)) out.push(s.url);
-  }
-  return out.slice(0, 6);
+function newsSearchDeps(): NewsSearchDeps {
+  return {
+    userAgent: BROWSER_UA,
+    relevance: topicRelevance,
+    fetchText: async (url, opts) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), opts?.timeoutMs ?? 12000);
+      try {
+        const res = await netFetch(
+          url,
+          {
+            signal: ctrl.signal,
+            method: opts?.method,
+            headers: opts?.headers,
+            body: opts?.body,
+          },
+          opts?.preferProxy === true,
+        );
+        return await res.text();
+      } finally {
+        clearTimeout(t);
+      }
+    },
+    decodeGoogleNewsUrl: (gnUrl) => decodeGoogleNewsUrlCached(gnUrl, decodeGoogleNewsUrl),
+  };
 }
 
 /** Resolve a search query or Baidu Hot Search topic into candidate real news article URLs. */
 export async function searchNewsCandidateUrls(query: string): Promise<string[]> {
-  const cleanQ = query
-    .replace(/\s+-\s+[^-]+$/, "") // strip " - 媒体名" suffix common in Google News titles
-    .replace(/[【】「」『』《》]/g, " ")
-    .trim();
-  if (!cleanQ || cleanQ.length < 2) return [];
-  const items: NewsCandidate[] = [];
-  const seen = new Set<string>();
-  const add = (u: string | undefined | null, titleHint?: string) => {
-    if (!u) return;
-    const cleaned = u.replace(/&amp;/g, "&").trim();
-    if (isRejectNewsUrl(cleaned) || seen.has(cleaned)) return;
-    seen.add(cleaned);
-    items.push({ url: cleaned, titleHint: titleHint?.replace(/<[^>]+>/g, "").trim() });
-  };
-
-  const goodCount = () => items.filter((i) => topicRelevance(cleanQ, i.titleHint || "", "") >= 0.2).length;
-
-  // Strategy A: Google News RSS via proxy (Baidu News is almost always CAPTCHA from WSL)
-  {
-    const queries = [cleanQ];
-    if (cleanQ.length > 10) {
-      const core = cleanQ.replace(/[：:，,！!？?].*$/, "").slice(0, 16).trim();
-      if (core.length >= 3 && core !== cleanQ) queries.push(core);
-    }
-    for (const q of queries) {
-      if (goodCount() >= 3) break;
-      try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 12000);
-        // Force proxy — news.google.com is unreachable/captcha from bare WSL CN egress
-        const gnRes = await netFetch(
-          `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans`,
-          { signal: ctrl.signal, headers: { "User-Agent": BROWSER_UA } },
-          true,
-        );
-        const xml = await gnRes.text();
-        clearTimeout(t);
-        for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
-          const block = m[1];
-          const title = block.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/i);
-          const link = block.match(/<link>(https:\/\/news\.google\.com\/rss\/articles\/[^<]+)<\/link>/i)?.[1];
-          const hint = (title?.[1] || title?.[2] || "").replace(/\s+-\s+[^-]+$/, "").trim();
-          if (!link) continue;
-          if (hint && topicRelevance(cleanQ, hint, "") < 0.18) continue;
-          const decoded = await decodeGoogleNewsUrl(link);
-          if (decoded) add(decoded, hint);
-        }
-      } catch { /* ignore */ }
-    }
-  }
-
-  // Strategy B: Bing News RSS via proxy (real article URL in apiclick ?url=)
-  if (goodCount() < 3) {
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 12000);
-      const bnRes = await netFetch(
-        `https://www.bing.com/news/search?q=${encodeURIComponent(cleanQ)}&format=rss`,
-        { signal: ctrl.signal, headers: { "User-Agent": BROWSER_UA } },
-        true,
-      );
-      const xml = await bnRes.text();
-      clearTimeout(t);
-      for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
-        const block = m[1];
-        const title = block.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/i);
-        const hint = (title?.[1] || title?.[2] || "").trim();
-        const link = block.match(/<link>([^<]+)<\/link>/i)?.[1]?.replace(/&amp;/g, "&") || "";
-        let u = "";
-        const enc = link.match(/[?&]url=(https?%3a%2f%2f[^&]+)/i)?.[1];
-        if (enc) {
-          try { u = decodeURIComponent(enc); } catch { /* ignore */ }
-        } else if (/^https?:\/\//i.test(link) && !/bing\.com/i.test(link)) {
-          u = link;
-        }
-        if (!u) continue;
-        if (hint && topicRelevance(cleanQ, hint, "") < 0.18) continue;
-        add(u, hint);
-      }
-    } catch { /* ignore */ }
-  }
-
-  // Strategy C: Baidu News (often CAPTCHA) — only if still empty
-  if (goodCount() < 1) {
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 8000);
-      const bdRes = await netFetch(
-        `https://www.baidu.com/s?rtt=1&bsst=1&cl=2&tn=news&word=${encodeURIComponent(cleanQ)}`,
-        {
-          signal: ctrl.signal,
-          headers: {
-            "User-Agent": BROWSER_UA,
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-          },
-        },
-      );
-      const html = await bdRes.text();
-      clearTimeout(t);
-      if (!/百度安全验证|wappass|验证码/i.test(html)) {
-        const titleAt: { idx: number; title: string }[] = [];
-        for (const m of html.matchAll(/<h3[^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/gi)) {
-          titleAt.push({ idx: m.index || 0, title: m[1] });
-        }
-        for (const m of html.matchAll(/\bmu=["'](https?:\/\/[^"']+)["']/gi)) {
-          const idx = m.index || 0;
-          let hint = "";
-          for (let i = titleAt.length - 1; i >= 0; i--) {
-            if (titleAt[i].idx <= idx && idx - titleAt[i].idx < 2500) {
-              hint = titleAt[i].title;
-              break;
-            }
-          }
-          add(m[1], hint);
-        }
-      }
-    } catch { /* ignore */ }
-  }
-
-  return rankNewsCandidates(cleanQ, items);
+  return searchNewsCandidateUrlsCore(query, newsSearchDeps());
 }
+
+/** Same as searchNewsCandidateUrls but with per-engine diagnostics (probes / smoke). */
+export async function searchNewsCandidateUrlsDetailed(query: string): Promise<NewsSearchResult> {
+  return searchNewsCandidates(query, newsSearchDeps());
+}
+
+export { isRejectNewsUrl };
 
 /** Unwrap aggregator / redirect URLs (Google News, Baidu Hot Search, Bing click, HN, etc.) to original URLs. */
 export async function unwrapArticleUrl(

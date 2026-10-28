@@ -49,13 +49,48 @@ export function EmptyState({ icon, title, hint, action }: { icon: React.ReactNod
 export function Modal({ open, onClose, title, children, width = "max-w-lg" }: {
   open: boolean; onClose: () => void; title: string; children: React.ReactNode; width?: string;
 }) {
+  const sheetRef = React.useRef<HTMLDivElement>(null);
+  const [kbPad, setKbPad] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!open || typeof window === "undefined" || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    const sync = () => {
+      const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      setKbPad(covered > 40 ? covered : 0);
+    };
+    sync();
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    return () => {
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+    };
+  }, [open]);
+
   if (!open) return null;
   return (
-    <div className="anim-fadeIn fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/45 backdrop-blur-[2px] p-4 pt-[7vh]" onClick={onClose}>
-      <div className={`anim-fadeUp w-full ${width} rounded-2xl bg-[#fffdf8] shadow-2xl`} onClick={(e) => e.stopPropagation()}>
+    <div
+      className="anim-fadeIn fixed inset-0 z-[70] flex items-end justify-center overflow-y-auto bg-black/45 backdrop-blur-[2px] p-0 max-md:items-end md:items-start md:p-4 md:pt-[7vh]"
+      onClick={onClose}
+      style={{ paddingBottom: kbPad || undefined }}
+    >
+      <div
+        ref={sheetRef}
+        className={`anim-fadeUp w-full ${width} rounded-t-2xl bg-[#fffdf8] shadow-2xl max-md:max-h-[min(92dvh,920px)] max-md:overflow-y-auto md:rounded-2xl`}
+        style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between border-b border-[#eee6d2] px-5 py-3.5">
           <div className="font-serif text-[16px] font-bold">{title}</div>
-          <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-full text-[#9a917c] hover:bg-[#f3eddd] hover:text-ink text-lg leading-none">×</button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-11 w-11 items-center justify-center rounded-full text-[#9a917c] hover:bg-[#f3eddd] hover:text-ink text-lg leading-none"
+            aria-label="关闭"
+          >
+            ×
+          </button>
         </div>
         <div className="px-5 py-4">{children}</div>
       </div>

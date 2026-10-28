@@ -1,3 +1,8 @@
+/**
+ * End-to-end Baidu hot-topic fulltext smoke against a running Conflux web server.
+ * Requires local/dev server + often NEWS_PROXY / app proxy for Google/Bing unwrap.
+ * Not part of CI — run manually: node scripts/smoke-baidu-topic.mjs
+ */
 const B = process.env.CONFLUX_URL || "http://127.0.0.1:3011";
 
 async function main() {

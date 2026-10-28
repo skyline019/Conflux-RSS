@@ -4,7 +4,7 @@ import {
   Star, Archive, ExternalLink, Sparkles, FileText, Trash2, Check, FolderPlus,
   Layers, Copy, ChevronDown, BookOpen, Clock3, Hash, Undo2, PlayCircle, Tv,
   Images, ZoomIn, ZoomOut, RotateCcw, ChevronLeft, ChevronRight, X, Sun, Moon,
-  PictureInPicture2, Volume2, Link2, Type, Share2, MoreHorizontal,
+  PictureInPicture2, Volume2, Link2, Type, Share2, MoreHorizontal, ChevronLeft,
 } from "lucide-react";
 import type { ArticleFull, CollectionRow, MediaItem } from "@/lib/client";
 import { api, fmtDateTime, timeAgo, DUP_REASON, FULLTEXT_LABEL, stanceColor, stanceLabel, proxiedImg } from "@/lib/client";
@@ -427,14 +427,23 @@ export default function Reader(p: Props) {
 
   const fontSizeStyle = fontScale === "sm" ? { fontSize: "15.5px" } : fontScale === "lg" ? { fontSize: "19.5px" } : undefined;
 
+  const dark = Boolean(p.darkMode);
+  const toolHover = dark ? "hover:bg-white/10" : "hover:bg-[#f1ead9]";
+  const toolMuted = dark ? "#cfc6b4" : "#57503f";
+  const barCls = dark
+    ? "border-white/10 bg-[#1a1714]/92"
+    : "border-[#eee6d2] bg-[#fffdf8]/95";
+
   const ToolBtn = ({ icon, label, onClick, active, activeColor, title, spinning }: {
     icon: React.ReactNode; label: string; onClick: () => void; active?: boolean; activeColor?: string; title?: string; spinning?: boolean;
   }) => (
     <button
+      type="button"
       onClick={onClick}
       title={title || label}
-      className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition hover:bg-[#f1ead9] sm:h-auto sm:min-w-0"
-      style={active ? { color: activeColor || "#e85a1e", background: `${activeColor || "#e85a1e"}14` } : { color: "#57503f" }}
+      aria-label={label}
+      className={`inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[12.5px] font-medium transition ${toolHover} sm:h-auto sm:min-w-0`}
+      style={active ? { color: activeColor || "#e85a1e", background: `${activeColor || "#e85a1e"}22` } : { color: toolMuted }}
     >
       {spinning ? <Spinner size={14} /> : icon}
       <span className="hidden sm:inline">{label}</span>
@@ -442,12 +451,21 @@ export default function Reader(p: Props) {
   );
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-[#fffdf8]">
-      {/* toolbar — sticky; primary actions + overflow「更多」on narrow */}
-      <div className="sticky top-0 z-20 flex items-center gap-0.5 border-b border-[#eee6d2] bg-[#fffdf8]/95 px-2 py-1.5 backdrop-blur-md sm:px-3 sm:py-2">
+    <section className={`flex min-w-0 flex-1 flex-col ${dark ? "bg-[#141210]" : "bg-[#fffdf8]"}`}>
+      {/* toolbar — sticky; icon back + primary actions; overflow sheet on mobile */}
+      <div
+        className={`sticky top-0 z-20 flex items-center gap-0.5 border-b px-2 pb-1.5 backdrop-blur-md sm:px-3 sm:py-2 ${barCls}`}
+        style={isMobile ? { paddingTop: "max(0.375rem, env(safe-area-inset-top))" } : undefined}
+      >
         {p.onBack && (
-          <button onClick={p.onBack} className="mr-1 inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-lg bg-[#1b1812] px-2.5 py-1.5 text-[12.5px] font-medium text-white md:hidden">
-            ← 列表
+          <button
+            type="button"
+            onClick={p.onBack}
+            aria-label="返回列表"
+            className={`mr-0.5 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition md:hidden ${toolHover}`}
+            style={{ color: toolMuted }}
+          >
+            <ChevronLeft size={22} strokeWidth={2.25} />
           </button>
         )}
         <ToolBtn
@@ -493,8 +511,10 @@ export default function Reader(p: Props) {
             }
             window.open(href, "_blank", "noopener,noreferrer");
           }}
-          className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium text-[#57503f] transition hover:bg-[#f1ead9]"
+          className={`inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[12.5px] font-medium transition ${toolHover}`}
+          style={{ color: toolMuted }}
           title="打开原文"
+          aria-label="打开原文"
         >
           <ExternalLink size={15} /><span className="hidden sm:inline">原文</span>
         </button>
@@ -558,28 +578,36 @@ export default function Reader(p: Props) {
             <ToolBtn icon={<Trash2 size={15} />} label="删除" onClick={remove} />
           </div>
 
-          {/* mobile: overflow menu */}
+          {/* mobile: overflow bottom sheet */}
           <div className="relative md:hidden">
             <button
               type="button"
               onClick={() => { setShowMoreTools((v) => !v); setShowCollections(false); }}
-              className="inline-flex h-11 min-w-[44px] items-center justify-center rounded-lg text-[#57503f] hover:bg-[#f1ead9]"
+              className={`inline-flex h-11 min-w-[44px] items-center justify-center rounded-xl transition ${toolHover}`}
+              style={{ color: toolMuted }}
               aria-label="更多操作"
             >
               <MoreHorizontal size={18} />
             </button>
             {showMoreTools && (
               <>
-                <div className="fixed inset-0 z-10" onClick={() => setShowMoreTools(false)} />
-                <div className="anim-fadeUp absolute right-0 top-12 z-20 w-52 rounded-xl border border-[#e3dccb] bg-white py-1.5 shadow-xl">
+                <div className="fixed inset-0 z-40 bg-black/45" onClick={() => setShowMoreTools(false)} />
+                <div
+                  className={`anim-fadeUp fixed inset-x-0 bottom-0 z-50 rounded-t-2xl border-t px-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 shadow-2xl ${
+                    dark ? "border-white/10 bg-[#1f1b17] text-[#f3eee3]" : "border-[#e3dccb] bg-white text-[#4c4433]"
+                  }`}
+                  role="dialog"
+                  aria-label="更多操作"
+                >
+                  <div className={`mx-auto mb-2 h-1 w-10 rounded-full ${dark ? "bg-white/25" : "bg-[#e3dccb]"}`} />
                   {[
-                    { label: article.isArchived ? "取消归档" : "归档", run: () => patch({ isArchived: !article.isArchived }, article.isArchived ? "已取消归档" : "已归档，全文永久保存") },
+                    { label: article.isArchived ? "取消归档" : "归档", run: () => { setShowMoreTools(false); void patch({ isArchived: !article.isArchived }, article.isArchived ? "已取消归档" : "已归档，全文永久保存"); } },
                     { label: "入集", run: () => { setShowMoreTools(false); setShowCollections(true); } },
                     { label: article.fullTextStatus === "success" ? "重抓全文" : "穿透抓全文", run: () => { setShowMoreTools(false); void fetchFullText(); } },
                     { label: mediaList.length > 0 ? `音视频 (${mediaList.length})` : "视频解析", run: () => { setShowMoreTools(false); setShowMediaParser((v) => !v); } },
                     ...(galleryImages.length > 0 ? [{ label: `图集 (${galleryImages.length})`, run: () => { setShowMoreTools(false); setZoom(1); setLightboxIdx(0); } }] : []),
                     { label: fontScale === "sm" ? "字号：小" : fontScale === "lg" ? "字号：大" : "字号：标准", run: () => setFontScale((s) => (s === "md" ? "lg" : s === "lg" ? "sm" : "md")) },
-                    ...(p.onToggleDark ? [{ label: p.darkMode ? "日间模式" : "夜间模式", run: () => p.onToggleDark?.() }] : []),
+                    ...(p.onToggleDark ? [{ label: p.darkMode ? "日间模式" : "夜间模式", run: () => { setShowMoreTools(false); p.onToggleDark?.(); } }] : []),
                     { label: "标为未读", run: () => { setShowMoreTools(false); void patch({ isRead: false }, "已标为未读"); } },
                     { label: "删除", run: () => { setShowMoreTools(false); void remove(); } },
                   ].map((item) => (
@@ -587,7 +615,9 @@ export default function Reader(p: Props) {
                       key={item.label}
                       type="button"
                       onClick={() => item.run()}
-                      className="flex min-h-[44px] w-full items-center px-3 text-left text-[13px] text-[#4c4433] hover:bg-[#faf5e8]"
+                      className={`flex min-h-[48px] w-full items-center rounded-xl px-4 text-left text-[15px] font-medium transition ${
+                        dark ? "hover:bg-white/8" : "hover:bg-[#faf5e8]"
+                      } ${item.label === "删除" ? "text-[#c62828]" : ""}`}
                     >
                       {item.label}
                     </button>

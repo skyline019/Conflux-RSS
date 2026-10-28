@@ -14,7 +14,11 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.JSArray;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import org.json.JSONException;
 
 @CapacitorPlugin(name = "ConfluxBackgroundRefresh")
 public class BackgroundRefreshPlugin extends Plugin {
@@ -62,7 +66,7 @@ public class BackgroundRefreshPlugin extends Plugin {
             return;
         }
         RefreshForegroundService svc = RefreshForegroundService.getInstance();
-        if (svc != null) svc.updateProgress(title, text, 0, 0);
+        if (svc != null) svc.updateProgress(title, text, null, 0, 0);
         call.resolve();
     }
 
@@ -80,11 +84,12 @@ public class BackgroundRefreshPlugin extends Plugin {
     public void updateProgress(PluginCall call) {
         String title = call.getString("title", "汇阅 · 刷新中");
         String text = call.getString("text", "");
+        String subText = call.getString("subText", null);
         int progress = call.getInt("progress", 0);
         int max = call.getInt("max", 0);
         RefreshForegroundService svc = RefreshForegroundService.getInstance();
         if (svc != null) {
-            svc.updateProgress(title, text, progress, max);
+            svc.updateProgress(title, text, subText, progress, max);
         }
         call.resolve();
     }
@@ -94,12 +99,13 @@ public class BackgroundRefreshPlugin extends Plugin {
         String title = call.getString("title", "汇阅 · 刷新完成");
         String text = call.getString("text", "订阅已更新");
         int added = call.getInt("added", 0);
+        List<String> lines = readLines(call);
         RefreshForegroundService svc = RefreshForegroundService.getInstance();
         if (svc != null) {
-            svc.showCompleted(title, text, added);
+            svc.showCompleted(title, text, added, lines);
         } else {
             // FGS already gone — still post the done notification so the user is not left silent
-            RefreshForegroundService.postDoneNotification(getContext(), title, text, added, false);
+            RefreshForegroundService.postDoneNotification(getContext(), title, text, added, false, lines);
             Intent stop = new Intent(getContext(), RefreshForegroundService.class);
             stop.setAction(RefreshForegroundService.ACTION_STOP);
             try { getContext().startService(stop); } catch (Exception ignored) { }
@@ -114,9 +120,25 @@ public class BackgroundRefreshPlugin extends Plugin {
         if (svc != null) {
             svc.showFailed(text);
         } else {
-            RefreshForegroundService.postDoneNotification(getContext(), "汇阅 · 刷新失败", text, 0, true);
+            RefreshForegroundService.postDoneNotification(getContext(), "汇阅 · 刷新失败", text, 0, true, null);
         }
         call.resolve();
+    }
+
+    private static List<String> readLines(PluginCall call) {
+        List<String> out = new ArrayList<>();
+        JSArray arr = call.getArray("lines");
+        if (arr == null) return out;
+        try {
+            for (int i = 0; i < arr.length(); i++) {
+                Object v = arr.get(i);
+                if (v != null) {
+                    String s = String.valueOf(v).trim();
+                    if (!s.isEmpty()) out.add(s);
+                }
+            }
+        } catch (JSONException ignored) { }
+        return out;
     }
 
     @PluginMethod

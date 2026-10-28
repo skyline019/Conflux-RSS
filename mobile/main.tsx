@@ -7,7 +7,7 @@ import { ErrorBoundary } from "./src/ErrorBoundary";
 import HomePage from "../src/app/page";
 import packageJson from "./package.json";
 
-const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.6");
+const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.7");
 
 (window as { __CONFLUX_MOBILE__?: boolean }).__CONFLUX_MOBILE__ = true;
 const rawFetch = window.fetch.bind(window);
@@ -24,12 +24,15 @@ rootEl.innerHTML = `<div style="min-height:100%;display:flex;flex-direction:colu
 installLocalApi(rawFetch)
   .then(async () => {
     await initNativeShell();
+    const onReady = () => { void hideSplash(); };
+    window.addEventListener("confluxBootReady", onReady, { once: true });
+    // Safety: never leave splash forever if boot hangs
+    window.setTimeout(onReady, 12000);
     createRoot(rootEl).render(
       <ErrorBoundary>
         <HomePage />
       </ErrorBoundary>,
     );
-    await hideSplash();
   })
   .catch(async (err) => {
     await hideSplash();

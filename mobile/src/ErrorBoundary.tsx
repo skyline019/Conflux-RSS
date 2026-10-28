@@ -1,7 +1,7 @@
 import React from "react";
 import packageJson from "../package.json";
 
-const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.6");
+const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.7");
 
 type Props = { children: React.ReactNode };
 type State = { error: Error | null };

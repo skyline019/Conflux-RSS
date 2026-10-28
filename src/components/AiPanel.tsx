@@ -5,6 +5,7 @@ import {
   Lightbulb, Gauge,
 } from "lucide-react";
 import { api, readSse, type AiJson, type ArticleFull } from "@/lib/client";
+import { tryParsePartialSummary } from "@/lib/summarizeCore";
 import { Spinner, toast, btnGhost } from "./ui";
 
 export default function AiPanel({
@@ -25,10 +26,12 @@ export default function AiPanel({
   const [data, setData] = useState<AiJson | null>((article.aiJson as AiJson) || null);
   const [busy, setBusy] = useState(false);
   const [stream, setStream] = useState("");
+  const [partial, setPartial] = useState<Partial<AiJson> | null>(null);
   const [open, setOpen] = useState(true);
   const [qa, setQa] = useState<{ q: string; a: string }[]>([]);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
+  const abortRef = React.useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const fromJson = article.aiJson as AiJson | null | undefined;
@@ -45,6 +48,9 @@ export default function AiPanel({
     }
     setQa([]);
     setStream("");
+    setPartial(null);
+    abortRef.current?.();
+    abortRef.current = null;
   }, [article.id, article.aiSummary, article.aiJson, article.aiKeyPoints, article.keywords]);
 
   const runRef = React.useRef<() => void>(() => {});
@@ -58,28 +64,47 @@ export default function AiPanel({
   }, [kick]);
 
   const run = () => {
-    if (!llmReady) {
-      onNeedSetup?.();
-      toast("请先在设置中配置并启用大模型", "error");
-      return;
-    }
     const w = window as Window & { __confluxIsOnline?: () => boolean };
-    if (typeof w.__confluxIsOnline === "function" && !w.__confluxIsOnline()) {
-      toast("当前离线，无法调用大模型", "error");
-      return;
+    const offline = typeof w.__confluxIsOnline === "function" && !w.__confluxIsOnline();
+    if (!llmReady && offline) {
+      // still allow extractive via stream endpoint
+    } else if (!llmReady) {
+      // extractive path — no setup required
+    } else if (offline) {
+      toast("当前离线，将使用本地抽取式摘要", "info");
     }
+    abortRef.current?.();
     setBusy(true);
     setStream("");
+    setPartial(null);
     let raw = "";
+    let lastPartialAt = 0;
     const stop = readSse(`/api/articles/${article.id}/summarize/stream`, {
       delta: (d) => {
         raw += d.delta || "";
         setStream(raw);
+        const now = Date.now();
+        if (now - lastPartialAt > 280) {
+          lastPartialAt = now;
+          const p = tryParsePartialSummary(raw);
+          if (p && (p.tldr || p.summary || p.whatHappened || p.background || p.implications)) {
+            setPartial({
+              tldr: p.tldr,
+              summary: p.summary,
+              whatHappened: p.whatHappened,
+              background: p.background,
+              implications: p.implications,
+              bullets: p.keyPoints,
+            });
+          }
+        }
       },
       done: (d) => {
         setBusy(false);
         setStream("");
+        setPartial(null);
         if (d.data) setData(d.data);
+        abortRef.current = null;
         stop();
         onUpdated();
         toast(d.source === "llm" ? "结构化摘要已生成" : "已生成本地摘要");
@@ -87,11 +112,14 @@ export default function AiPanel({
       error: (d) => {
         setBusy(false);
         setStream("");
+        setPartial(null);
+        abortRef.current = null;
         toast(d.error || "总结失败", "error");
         stop();
       },
       close: () => setBusy(false),
     });
+    abortRef.current = () => { stop(); setBusy(false); setStream(""); setPartial(null); };
   };
   runRef.current = run;
 
@@ -156,20 +184,41 @@ export default function AiPanel({
               </button>
               <span className="text-[12px] text-[#9a7350]">
                 一句话结论、要点、实体、立场与质量评分
-                {llmReady ? "" : "（需先配置大模型）"}
+                {llmReady ? "" : "（未配置大模型时使用本地抽取）"}
               </span>
             </div>
           )}
 
           {busy && (
             <div>
-              <div className="flex items-center gap-2 text-[13px] text-[#9a7350]">
-                <Spinner size={14} /> 模型生成中…（{stream.length} 字符）
+              <div className="flex items-center justify-between gap-2 text-[13px] text-[#9a7350]">
+                <span className="inline-flex items-center gap-2">
+                  <Spinner size={14} /> 生成中…（{stream.length} 字符）
+                </span>
+                <button
+                  type="button"
+                  className={`${btnGhost} !px-2 !py-1 text-[12px]`}
+                  onClick={() => abortRef.current?.()}
+                >
+                  取消
+                </button>
               </div>
-              {partialTldr && (
+              {(partial?.tldr || partialTldr) && (
                 <div className="mt-2 rounded-lg bg-[#fffdf8] px-3 py-2 text-[14px] font-semibold text-[#8a5a1d]">
-                  {partialTldr}
+                  {partial?.tldr || partialTldr}
                 </div>
+              )}
+              {partial?.summary && (
+                <p className="mt-2 text-[13px] leading-[1.7] text-[#57503f]">{partial.summary}</p>
+              )}
+              {partial?.background && (
+                <p className="mt-1.5 text-[12.5px] text-[#6d6450]"><span className="font-semibold">背景 · </span>{partial.background}</p>
+              )}
+              {partial?.whatHappened && (
+                <p className="mt-1 text-[12.5px] text-[#6d6450]"><span className="font-semibold">经过 · </span>{partial.whatHappened}</p>
+              )}
+              {partial?.implications && (
+                <p className="mt-1 text-[12.5px] text-[#6d6450]"><span className="font-semibold">影响 · </span>{partial.implications}</p>
               )}
             </div>
           )}

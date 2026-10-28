@@ -12,7 +12,7 @@
 |:--|:--|
 | **安装包** | [Releases · 最新 APK](https://github.com/skyline019/Conflux-RSS/releases/latest) |
 | **文档** | [用户指南](./mobile/docs/USER_GUIDE.md) · [架构](./mobile/docs/ARCHITECTURE.md) · [作品说明](./mobile/docs/PORTFOLIO.md) |
-| **当前版本** | **0.2.6** · `app.conflux.mobile` · versionCode **7** |
+| **当前版本** | **0.2.7** · `app.conflux.mobile` · versionCode **8** |
 
 ---
 

@@ -17,8 +17,14 @@ type BgRefreshPlugin = {
   schedule: (o: { intervalMinutes: number; wifiOnly: boolean }) => Promise<{ ok: boolean; intervalMinutes: number }>;
   cancel: () => Promise<void>;
   startProgress: (o: { title?: string; text?: string }) => Promise<void>;
-  updateProgress: (o: { title?: string; text?: string; progress?: number; max?: number }) => Promise<void>;
-  complete: (o: { title?: string; text?: string; added?: number }) => Promise<void>;
+  updateProgress: (o: {
+    title?: string;
+    text?: string;
+    subText?: string;
+    progress?: number;
+    max?: number;
+  }) => Promise<void>;
+  complete: (o: { title?: string; text?: string; added?: number; lines?: string[] }) => Promise<void>;
   fail: (o: { text?: string }) => Promise<void>;
   stopSilent: () => Promise<void>;
   moveToBackground: () => Promise<void>;
@@ -108,9 +114,7 @@ export async function initNativeShell() {
     await setStatusBarTheme(dark);
   } catch { /* web */ }
 
-  try {
-    await SplashScreen.hide({ fadeOutDuration: 200 });
-  } catch { /* already hidden */ }
+  // Splash stays until HomePage finishes booting (hideSplash from page / main)
 
   try {
     const status = await Network.getStatus();
@@ -237,6 +241,7 @@ export async function runBackgroundFeedRefresh() {
     let totals = { added: 0, duplicates: 0, filtered: 0, errors: 0, htmlPolished: 0 };
     let lastDone = 0;
     let lastTotal = 0;
+    const inboxLines: string[] = [];
 
     while (true) {
       const { done, value } = await reader.read();
@@ -259,10 +264,17 @@ export async function runBackgroundFeedRefresh() {
         if (ev.type === "feed" && ev.result) {
           lastDone = Number(ev.done || 0);
           lastTotal = Number(ev.total || 0);
-          const label = `${lastDone}/${lastTotal || "?"} · ${ev.result.feedTitle}${ev.result.added ? ` +${ev.result.added}` : ""}`;
+          const feedTitle = ev.result.feedTitle || "订阅源";
+          const addedN = Number(ev.result.added || 0);
+          const label = `${lastDone}/${lastTotal || "?"} · ${feedTitle}${addedN ? ` +${addedN}` : ""}`;
+          if (addedN > 0) {
+            inboxLines.push(`${feedTitle} +${addedN}`);
+            if (inboxLines.length > 12) inboxLines.shift();
+          }
           await BgRefresh.updateProgress({
             title: "汇阅 · 刷新中",
             text: label,
+            subText: lastTotal > 0 ? `源 ${lastDone}/${lastTotal}` : undefined,
             progress: lastDone,
             max: Math.max(lastTotal, 1),
           });
@@ -285,6 +297,7 @@ export async function runBackgroundFeedRefresh() {
         title: totals.added > 0 ? "汇阅 · 刷新完成" : "汇阅 · 已检查",
         text: summary,
         added: totals.added,
+        lines: inboxLines.length ? inboxLines : undefined,
       });
     } else {
       await BgRefresh.stopSilent();

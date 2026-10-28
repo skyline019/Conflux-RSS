@@ -20,11 +20,24 @@ import {
   type ComparisonResult,
 } from "@/lib/compareArc";
 import { searchNewsCandidates } from "@/lib/newsSearch";
+import {
+  isSummaryCacheHit,
+  parseJsonLoose,
+  summarizeArticleCore,
+  summaryFromParsed,
+  SUM_SYSTEM,
+  type SummaryResult,
+} from "@/lib/summarizeCore";
 import { countWords, discoverFeeds, extractArticle, parseFeed, strip } from "./read";
 import { clearLlmApiKey, getLlmApiKey, setLlmApiKey } from "./secure";
+import {
+  analyzeArticleClusterMobile,
+  assignToClusterMobile,
+  rebuildClustersMobile,
+} from "./clusterMobile";
 import packageJson from "../package.json";
 
-const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.6");
+const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.7");
 const COLORS = ["#ee802f", "#2563eb", "#7c3aed", "#059669", "#dc2626", "#0e7490", "#b45309", "#be185d", "#334155"];
 const nowIso = () => new Date().toISOString();
 const sqlText = (value: unknown): string | null => (value == null ? null : String(value));
@@ -188,11 +201,40 @@ function rebuildAllArticleFts() {
   for (const row of ids) refreshArticleFts(Number(row.id));
 }
 
+/** Rebuild FTS only when table missing or row counts drift — not on every cold start. */
+function needsArticlesFtsRebuild(): boolean {
+  if (!ensureArticlesFts()) return false;
+  try {
+    const articlesN = Number(get<{ n: number }>("select count(*) as n from articles")?.n || 0);
+    const ftsN = Number(get<{ n: number }>("select count(*) as n from articles_fts")?.n || 0);
+    return articlesN !== ftsN;
+  } catch {
+    return true;
+  }
+}
+
+function scheduleIdleFtsRebuild() {
+  const run = () => {
+    try {
+      if (needsArticlesFtsRebuild()) rebuildAllArticleFts();
+    } catch { /* FTS optional */ }
+  };
+  const w = window as Window & {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+  };
+  if (typeof w.requestIdleCallback === "function") {
+    w.requestIdleCallback(run, { timeout: 4000 });
+  } else {
+    window.setTimeout(run, 800);
+  }
+}
+
 async function searchAggregate(sp: URLSearchParams) {
   const started = Date.now();
   const q = (sp.get("q") || sp.get("search") || "").trim();
   const related = sp.get("related") !== "0";
   const external = sp.get("external") !== "0";
+  const allowLlm = sp.get("llm") !== "0";
   const clusterId = Number(sp.get("clusterId")) || 0;
   const limit = Math.min(80, Math.max(5, Number(sp.get("limit")) || 40));
   if (!q) {
@@ -261,7 +303,7 @@ async function searchAggregate(sp: URLSearchParams) {
   }
 
   let extraHits: AggregateArticle[] = [];
-  if (ready && hits.length < 12) {
+  if (allowLlm && ready && hits.length < 12) {
     try {
       const { terms: rw } = await llmRewriteTerms(q, async (messages, opts) =>
         chat(messages, opts?.maxTokens ?? 80, opts?.temperature ?? 0, s),
@@ -323,15 +365,34 @@ async function searchAggregate(sp: URLSearchParams) {
     }
   }
 
-  const clusterInputs = all<Row>("select * from clusters where article_count >= 2 order by last_seen_at desc limit 80")
-    .map(clusterView)
-    .map((c) => ({
-      id: Number(c.id),
-      title: String(c.title || ""),
-      keywords: c.keywords as string[],
-      lastSeenAt: (c.lastSeenAt as string | null) ?? null,
-      memberTitles: (c.members || []).map((m: { title?: string }) => String(m.title || "")),
-    }));
+  // Batch cluster meta — avoid N+1 clusterView member queries on every keystroke
+  const clusterRows = all<Row>(
+    `select id, title, keywords, last_seen_at as lastSeenAt from clusters
+     where article_count >= 2 order by last_seen_at desc limit 80`,
+  );
+  const clusterIdList = clusterRows.map((c) => Number(c.id));
+  const titlesByCluster = new Map<number, string[]>();
+  if (clusterIdList.length) {
+    const titleRows = all<{ clusterId: number; title: string }>(
+      `select cluster_id as clusterId, title from articles
+       where cluster_id in (${clusterIdList.map(() => "?").join(",")})
+       order by coalesce(published_at, created_at) desc`,
+      clusterIdList,
+    );
+    for (const row of titleRows) {
+      const cid = Number(row.clusterId);
+      const bag = titlesByCluster.get(cid) || [];
+      if (bag.length < 8) bag.push(String(row.title || ""));
+      titlesByCluster.set(cid, bag);
+    }
+  }
+  const clusterInputs = clusterRows.map((c) => ({
+    id: Number(c.id),
+    title: String(c.title || ""),
+    keywords: (() => { try { return JSON.parse(String(c.keywords || "[]")) as string[]; } catch { return []; } })(),
+    lastSeenAt: (c.lastSeenAt as string | null) ?? null,
+    memberTitles: titlesByCluster.get(Number(c.id)) || [],
+  }));
 
   let externalHits: { title: string; url: string; source: string; score?: number }[] = [];
   let externalOk = false;
@@ -370,8 +431,8 @@ async function searchAggregate(sp: URLSearchParams) {
     externalOk,
     related: related && !clusterId,
     limit,
-    llmReady: ready,
-    chat: ready
+    llmReady: allowLlm && ready,
+    chat: allowLlm && ready
       ? async (messages, opts) => chat(messages, opts?.maxTokens ?? 180, opts?.temperature ?? 0, s)
       : undefined,
     startedAt: started,
@@ -570,55 +631,9 @@ function articleFull(id: number) {
   };
 }
 
-const SUM_SYSTEM = `你是一名资深新闻编辑与信息分析师。请基于用户提供的文章原文做结构化分析，内容要详实、便于深度阅读。
-要求：
-1. 以原文为依据；可对因果与背景做合理延展，但不得捏造原文未出现的具体数字、日期或引语。信息不足的字段填 null 或空数组。
-2. 用中文输出。
-3. 严格输出 JSON，不要加入任何解释性文字或代码块标记。
-JSON 结构：
-{
-  "tldr": "一句话结论，40字以内",
-  "summary": "300-450字客观详实摘要，涵盖何人/何事/何时/何地/为何与结果",
-  "whatHappened": "80-160字事件经过拆解",
-  "background": "60-140字背景铺垫（前文脉络、相关政策或争议）",
-  "implications": "60-140字影响与可能后续",
-  "bullets": ["要点1","要点2","要点3","要点4","要点5"],
-  "entities": [{"name":"实体","type":"人物|机构|地点|产品|事件","role":"在文中的作用"}],
-  "numbers": ["文中关键数据及含义"],
-  "stance": {"tone":"positive|neutral|negative","label":"倾向描述","evidence":"判断依据原文片段"},
-  "quality": {"depth":1-5,"evidence":1-5,"novelty":1-5,"note":"评价一句话"},
-  "tags": ["标签"],
-  "questions": ["读者延伸追问1","追问2","追问3"],
-  "reading_time_min": 数字
-}`;
-
 const ARC_JSON_SHAPE = `{"overallSummary":"详实总览200-400字","consensus":["共识"],"divergences":[{"aspect":"维度","description":"说明"}],"timeline":[{"time":"时间","event":"事件标题","detail":"经过与细节","impact":"影响","source":"媒体","confidence":0到1,"kind":"reported|ai_supplement","actors":["行为体"]}],"countryOrActorAttitudes":[{"actor":"国家或机构","attitude":"中立|客观|主观|积极|消极","score":-1到1,"summary":"2-4句立场概述","rationale":"为何持该态度","drivers":["驱动因素"],"evidenceQuotes":["原文短引"],"supplementNote":"若含分析补充则注明否则空"}],"sources":[{"articleId":数字,"stanceScore":-1到1,"stanceLabel":"五类之一","attitude":{"valence":-1到1,"objectivity":0到1,"label":"中立|客观|主观|积极|消极"},"narrative":"叙述框架","tone":"语气","keyPoints":["论点"],"uniqueInfo":["独有信息"],"framingWords":["倾向词"]}]}`;
 
-function summaryFromParsed(parsed: Record<string, unknown>) {
-  const bullets = (Array.isArray(parsed.bullets) ? parsed.bullets : Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [])
-    .map((x) => String(x)).filter(Boolean).slice(0, 8);
-  const tags = (Array.isArray(parsed.tags) ? parsed.tags : Array.isArray(parsed.keywords) ? parsed.keywords : [])
-    .map((x) => String(x)).filter(Boolean).slice(0, 10);
-  const summary = String(parsed.summary || parsed.tldr || "").trim();
-  return {
-    summary,
-    keyPoints: bullets,
-    keywords: tags,
-    tldr: parsed.tldr ? String(parsed.tldr) : undefined,
-    entities: parsed.entities,
-    numbers: parsed.numbers,
-    stance: parsed.stance as { tone?: string; label?: string; evidence?: string } | undefined,
-    quality: parsed.quality as { depth?: number; evidence?: number; novelty?: number; note?: string } | undefined,
-    questions: Array.isArray(parsed.questions) ? parsed.questions.map(String) : [],
-    readingTimeMin: typeof parsed.reading_time_min === "number" ? parsed.reading_time_min : undefined,
-    background: parsed.background ? String(parsed.background) : undefined,
-    whatHappened: parsed.whatHappened ? String(parsed.whatHappened) : undefined,
-    implications: parsed.implications ? String(parsed.implications) : undefined,
-    raw: parsed,
-  };
-}
-
-function persistAi(id: number, result: ReturnType<typeof summaryFromParsed> & { source: string }) {
+function persistAi(id: number, result: SummaryResult) {
   const stance = result.stance?.tone === "positive" ? 0.55 : result.stance?.tone === "negative" ? -0.55 : null;
   run(
     `update articles set ai_summary = ?, ai_source = ?, ai_key_points = ?, ai_json = ?, ai_at = ?,
@@ -719,19 +734,6 @@ async function chat(messages: { role: string; content: string }[], maxTokens: nu
   if (!content) throw new Error(data?.error?.message || "大模型返回为空");
   return String(content);
 }
-function parseJsonLoose(text: string) {
-  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  try { return JSON.parse(cleaned); } catch { /* extract */ }
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
-  throw new Error("大模型返回的 JSON 无法解析");
-}
-function extractive(text: string) {
-  const sentences = text.split(/(?<=[。！？.!?])/).map((s) => s.trim()).filter((s) => s.length > 12).slice(0, 3);
-  return sentences.join("") || text.slice(0, 180);
-}
-
 async function storeFullText(id: number) {
   const article = get<Row>("select * from articles where id = ?", [id]);
   if (!article) return { ok: false, wordCount: 0 };
@@ -759,33 +761,27 @@ async function storeFullText(id: number) {
 }
 
 async function summarize(id: number, onDelta?: (chunk: string) => void) {
-  const article = get<Row>("select id, title, content, rss_summary from articles where id = ?", [id]);
+  const article = get<Row>("select id, title, content, rss_summary, ai_json, ai_summary from articles where id = ?", [id]);
   if (!article) throw new Error("文章不存在");
   const body = strip(String(article.content || article.rss_summary || ""));
   if (body.length < 40) throw new Error("正文太短，无法总结（请先抓取全文）");
   const current = await settingsResolved();
-  if (!llmReady(current)) {
-    const summary = extractive(body);
-    const bullets = summary.split(/(?<=[。！？])/).map((s) => s.trim()).filter(Boolean).slice(0, 3);
-    const shaped = summaryFromParsed({
-      tldr: summary.slice(0, 40), summary, bullets, tags: [], questions: [],
-    });
-    const result = { ...shaped, source: "extractive" as const };
-    onDelta?.(JSON.stringify(result.raw));
-    persistAi(id, result);
+  let cachedJson: unknown = null;
+  try { cachedJson = article.ai_json ? JSON.parse(String(article.ai_json)) : null; } catch { /* */ }
+  if (isSummaryCacheHit(cachedJson, body, String(current.llmModel || "")) && article.ai_summary) {
+    const shaped = summaryFromParsed(cachedJson as Record<string, unknown>);
+    const result = { ...shaped, source: (String(article.ai_source || "llm") === "extractive" ? "extractive" : "llm") as "llm" | "extractive" };
+    onDelta?.(JSON.stringify(result.raw || cachedJson));
     return result;
   }
-  const messages = [
-    { role: "system", content: `${SUM_SYSTEM}\n注意：请直接开始输出 JSON。` },
-    { role: "user", content: `【标题】${article.title}\n【正文】\n${body.slice(0, 12000)}` },
-  ];
-  const raw = onDelta
-    ? await chatStream(messages, onDelta, 2500, 0.3, current)
-    : await chat(messages, 2500, 0.3, current);
-  const parsed = parseJsonLoose(raw) as Record<string, unknown>;
-  const shaped = summaryFromParsed(parsed);
-  if (!shaped.summary) throw new Error("大模型没有返回摘要");
-  const result = { ...shaped, source: "llm" as const };
+  const result = await summarizeArticleCore(String(article.title), body, {
+    llmReady: llmReady(current),
+    onDelta,
+    chatComplete: async (messages, opts) =>
+      chat(messages, opts.maxTokens, opts.temperature, current),
+    chatStream: async (messages, delta, opts) =>
+      chatStream(messages, delta, opts.maxTokens, opts.temperature, current),
+  });
   persistAi(id, result);
   return result;
 }
@@ -832,6 +828,7 @@ async function refreshFeed(feed: Row) {
     if (inserted.changes > 0) {
       added += 1;
       refreshArticleFts(inserted.lastId);
+      try { assignToClusterMobile(inserted.lastId); } catch { /* incremental assign best-effort */ }
       if (status === "pending") fresh.push(inserted.lastId);
     }
     else duplicates += 1;
@@ -945,175 +942,12 @@ async function refreshAll(feedId: number) {
   return { results, totals };
 }
 
-function bigramSet(value: string) {
-  const norm = String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-  const set = new Set<string>();
-  for (const word of norm.split(/\s+/)) {
-    if (!word) continue;
-    if (/^[a-z0-9]+$/.test(word) || word.length === 1) { set.add(word); continue; }
-    for (let i = 0; i < word.length - 1; i++) set.add(word.slice(i, i + 2));
-  }
-  return set;
-}
-function jaccard(left: Set<string>, right: Set<string>) {
-  if (!left.size || !right.size) return 0;
-  let shared = 0;
-  const [small, large] = left.size < right.size ? [left, right] : [right, left];
-  for (const item of small) if (large.has(item)) shared += 1;
-  return shared / (left.size + right.size - shared);
-}
-const STOP = new Set("的 了 是 在 和 与 也 将 对 为 等 中 上 下 不 有 被 已 以 及 其 后 前 更 最 新 这 那 个 一 the a an and or of to in on for with is are was were be by at as it this that from has have will new after over more than www com https http".split(" "));
-function keywordsOf(title: string, body: string) {
-  const freq = new Map<string, number>();
-  const take = (text: string, bonus: number) => {
-    const lower = String(text || "").toLowerCase();
-    for (const word of lower.match(/[a-z][a-z0-9-]{2,}/g) || []) if (!STOP.has(word)) freq.set(word, (freq.get(word) || 0) + bonus);
-    for (const run of lower.match(/[\u4e00-\u9fff]+/g) || []) for (let i = 0; i < run.length - 1; i++) freq.set(run.slice(i, i + 2), (freq.get(run.slice(i, i + 2)) || 0) + bonus);
-  };
-  take(body, 1); take(title, 3);
-  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([word]) => word);
-}
 function rebuildClusters(onProgress?: (ev: { phase: string; done: number; total: number }) => void) {
-  type ClusterRow = {
-    id: number;
-    title: string;
-    feedId: number;
-    time: number;
-    grams: Set<string>;
-    keywords: string[];
-    entities: Set<string>;
-  };
-  const current = settings();
-  const threshold = Number(current.clusterThreshold) || 0.27;
-  const windowMs = (Number(current.clusterWindowHours) || 96) * 2 * 3600 * 1000;
-  // Full corpus, full body for keywords (never ai_summary)
-  const raw = all<Row>(`select id, title, feed_id as feedId, coalesce(content, rss_summary, '') as body, coalesce(published_at, created_at) as seen from articles where length(title) >= 4 order by seen desc`);
-  const rows: ClusterRow[] = raw.map((row, i) => {
-    if (i % 40 === 0) onProgress?.({ phase: "keywords", done: i, total: raw.length });
-    run("update articles set keywords = ? where id = ?", [JSON.stringify(keywordsOf(String(row.title), String(row.body || ""))), Number(row.id)]);
-    refreshArticleFts(Number(row.id));
-    return {
-      id: Number(row.id),
-      title: String(row.title),
-      feedId: Number(row.feedId),
-      time: row.seen ? Date.parse(String(row.seen)) || 0 : 0,
-      grams: bigramSet(String(row.title)),
-      keywords: keywordsOf(String(row.title), String(row.body || "")),
-      entities: new Set([...String(row.title).matchAll(/[A-Za-z][A-Za-z0-9-]{2,}|\d+(?:\.\d+)?%?/g)].map((match) => match[0].toLowerCase()).filter((item) => !/^\d$/.test(item))),
-    };
-  });
-  onProgress?.({ phase: "keywords", done: rows.length, total: rows.length });
-  const df = new Map<string, number>();
-  for (const row of rows) for (const word of new Set(row.keywords)) df.set(word, (df.get(word) || 0) + 1);
-  const weights = new Map([...df].map(([word, count]) => [word, Math.log(1 + Math.max(1, rows.length) / count)]));
-  const overlap = (left: string[], right: string[]) => {
-    if (!left.length || !right.length) return 0;
-    const weight = (word: string) => weights.get(word) || 1;
-    const rightSet = new Set(right);
-    let shared = 0;
-    for (const word of new Set(left)) if (rightSet.has(word)) shared += weight(word);
-    const sum = (words: string[]) => [...new Set(words)].reduce((total, word) => total + weight(word), 0);
-    const denom = Math.min(sum(left), sum(right));
-    return denom > 0 ? shared / denom : 0;
-  };
-  const scoreOf = (left: typeof rows[number], right: typeof rows[number]) => {
-    const titleScore = jaccard(left.grams, right.grams);
-    if (titleScore < 0.38) return 0;
-    let score = titleScore * 0.5 + overlap(left.keywords, right.keywords) * 0.5;
-    for (const entity of left.entities) if (right.entities.has(entity)) { score += 0.15; break; }
-    return Math.min(1, score);
-  };
-  exec("update articles set cluster_id = null");
-  exec("delete from clusters");
-  type Bucket = { members: ClusterRow[] };
-  const buckets: Bucket[] = [];
-  const recent: (ClusterRow & { bucket: Bucket })[] = [];
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (i % 25 === 0) onProgress?.({ phase: "link", done: i, total: rows.length });
-    while (recent.length && recent[recent.length - 1].time - row.time > windowMs) recent.pop();
-    let best: Bucket | null = null;
-    let bestScore = 0;
-    const seen = new Set<object>();
-    for (const other of recent) {
-      if (other.feedId === row.feedId) continue; // cross-feed only
-      if (seen.has(other.bucket)) continue;
-      seen.add(other.bucket);
-      let score = 0;
-      for (const member of other.bucket.members.slice(0, 5)) {
-        if (member.feedId === row.feedId) continue;
-        score = Math.max(score, scoreOf(row, member));
-      }
-      if (score > bestScore) { bestScore = score; best = other.bucket; }
-    }
-    const bucket: Bucket = best && bestScore >= threshold ? best : { members: [] };
-    if (bucket !== best) buckets.push(bucket);
-    bucket.members.unshift(row);
-    recent.unshift(Object.assign(row, { bucket }));
-  }
-  onProgress?.({ phase: "link", done: rows.length, total: rows.length });
-  let assigned = 0;
-  let writeDone = 0;
-  exec("begin");
-  try {
-    for (const bucket of buckets) {
-      writeDone += 1;
-      if (writeDone % 10 === 0) onProgress?.({ phase: "write", done: writeDone, total: buckets.length });
-      const feedSet = new Set(bucket.members.map((member) => member.feedId));
-      if (feedSet.size < 2) continue; // multi-source events only
-      const clusterId = run("insert into clusters(title, keywords, created_at) values(?, ?, ?)", [String(bucket.members[0].title), JSON.stringify(bucket.members[0].keywords), nowIso()]).lastId;
-      for (const member of bucket.members) { run("update articles set cluster_id = ? where id = ?", [clusterId, Number(member.id)]); assigned += 1; }
-    }
-    exec("commit");
-  } catch (err) { exec("rollback"); throw err; }
-  onProgress?.({ phase: "write", done: buckets.length, total: buckets.length });
-  for (const cluster of all<{ id: number }>("select id from clusters")) {
-    const stat = get<Row>("select count(*) as n, count(distinct feed_id) as sources, min(coalesce(published_at, created_at)) as firstSeen, max(coalesce(published_at, created_at)) as lastSeen from articles where cluster_id = ?", [cluster.id]);
-    if (!stat || Number(stat.n) < 2 || Number(stat.sources) < 2) { run("update articles set cluster_id = null where cluster_id = ?", [cluster.id]); run("delete from clusters where id = ?", [cluster.id]); continue; }
-    const titles = all<{ title: string }>("select title from articles where cluster_id = ?", [cluster.id]).map((row) => row.title);
-    const title = titles.slice().sort((a, b) => Math.abs(a.length - 26) - Math.abs(b.length - 26))[0];
-    run("update clusters set title = ?, article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [title, Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), cluster.id]);
-  }
-  return { clusters: Number(get<{ n: number }>("select count(*) as n from clusters")?.n || 0), assigned };
+  return rebuildClustersMobile(onProgress);
 }
 
 function analyzeArticleCluster(articleId: number) {
-  const me = get<Row>("select id, title, feed_id as feedId, cluster_id as clusterId, keywords, coalesce(published_at, created_at) as seen from articles where id = ?", [articleId]);
-  if (!me) return { clusterId: null, matches: [] as { id: number; title: string; feedId: number; score: number }[] };
-  const current = settings();
-  const threshold = Number(current.clusterThreshold) || 0.27;
-  const windowMs = (Number(current.clusterWindowHours) || 96) * 2 * 3600 * 1000;
-  const meTime = me.seen ? Date.parse(String(me.seen)) || 0 : 0;
-  const meGrams = bigramSet(String(me.title));
-  const meKw = parseJsonList(me.keywords).length ? parseJsonList(me.keywords) as string[] : keywordsOf(String(me.title), "");
-  const recent = all<Row>(`select id, title, feed_id as feedId, cluster_id as clusterId, keywords, coalesce(published_at, created_at) as seen from articles where id != ? order by seen desc limit 800`, [articleId]);
-  const hits: { id: number; title: string; feedId: number; clusterId: number | null; score: number }[] = [];
-  for (const other of recent) {
-    const otherTime = other.seen ? Date.parse(String(other.seen)) || 0 : 0;
-    if (meTime && otherTime && Math.abs(meTime - otherTime) > windowMs) continue;
-    const score = jaccard(meGrams, bigramSet(String(other.title)));
-    if (score < Math.max(0.38, threshold)) continue;
-    hits.push({ id: Number(other.id), title: String(other.title), feedId: Number(other.feedId), clusterId: other.clusterId == null ? null : Number(other.clusterId), score });
-  }
-  hits.sort((a, b) => b.score - a.score);
-  const top = hits.slice(0, 12);
-  const matches = top.map((h) => ({ id: h.id, title: h.title, feedId: h.feedId, score: Math.round(h.score * 1000) / 1000 }));
-  if (!top.length) return { clusterId: me.clusterId == null ? null : Number(me.clusterId), matches };
-  const host = top.find((h) => h.clusterId)?.clusterId || null;
-  if (host) {
-    run("update articles set cluster_id = ? where id = ?", [host, articleId]);
-    for (const h of top.filter((item) => !item.clusterId)) run("update articles set cluster_id = ? where id = ?", [host, h.id]);
-    const stat = get<Row>("select count(*) as n, count(distinct feed_id) as sources, min(coalesce(published_at, created_at)) as firstSeen, max(coalesce(published_at, created_at)) as lastSeen from articles where cluster_id = ?", [host]);
-    if (stat) run("update clusters set article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), host]);
-    return { clusterId: host, matches };
-  }
-  const title = String(me.title).length <= top[0].title.length ? String(me.title) : top[0].title;
-  const clusterId = run("insert into clusters(title, keywords, article_count, source_count, created_at) values(?, ?, ?, ?, ?)", [title, JSON.stringify(meKw), top.length + 1, 1, nowIso()]).lastId;
-  run("update articles set cluster_id = ? where id = ?", [clusterId, articleId]);
-  for (const h of top) run("update articles set cluster_id = ? where id = ?", [clusterId, h.id]);
-  const stat = get<Row>("select count(*) as n, count(distinct feed_id) as sources, min(coalesce(published_at, created_at)) as firstSeen, max(coalesce(published_at, created_at)) as lastSeen from articles where cluster_id = ?", [clusterId]);
-  if (stat) run("update clusters set article_count = ?, source_count = ?, first_seen_at = ?, last_seen_at = ? where id = ?", [Number(stat.n), Number(stat.sources), sqlText(stat.firstSeen), sqlText(stat.lastSeen), clusterId]);
-  return { clusterId, matches };
+  return analyzeArticleClusterMobile(articleId);
 }
 
 function clusterView(row: Row) {
@@ -1860,7 +1694,11 @@ export async function installLocalApi(rawFetch: typeof window.fetch) {
   setRawFetch(rawFetch);
   await openDatabase();
   try {
-    rebuildAllArticleFts();
+    if (!articlesFtsAvailable()) {
+      ensureArticlesFts();
+    }
+    // Defer full rebuild to after first paint when counts drift; never block boot
+    scheduleIdleFtsRebuild();
   } catch {
     /* FTS optional on first boot */
   }

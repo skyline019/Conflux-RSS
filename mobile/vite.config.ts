@@ -44,6 +44,7 @@ export default defineConfig({
       "react-dom": path.resolve(__dirname, "node_modules/react-dom"),
       "lucide-react": path.resolve(__dirname, "node_modules/lucide-react"),
       "hls.js": path.resolve(__dirname, "node_modules/hls.js"),
+      "@tanstack/react-virtual": path.resolve(__dirname, "node_modules/@tanstack/react-virtual"),
     },
     dedupe: ["react", "react-dom", "lucide-react"],
   },
@@ -52,5 +53,20 @@ export default defineConfig({
     include: ["fts5-sql-bundle"],
   },
   assetsInclude: ["**/*.wasm"],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("fts5-sql-bundle") || id.includes("sql-wasm")) return "sql-fts";
+          if (id.includes("node_modules/hls.js")) return "hls";
+          if (id.includes("@capacitor")) return "capacitor";
+          if (id.includes("/mobile/src/api") || id.includes("/mobile/src/db") || id.includes("/mobile/src/read")) {
+            return "local-api";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   server: { port: 5176, strictPort: true },
 });

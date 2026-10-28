@@ -1,7 +1,7 @@
 {
   "name": "conflux-mobile",
   "private": true,
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "汇阅手机版。数据在本机 SQLite，不连接电脑。",
   "scripts": {
     "dev": "vite",
@@ -27,6 +27,7 @@
     "@capacitor/splash-screen": "^7.0.5",
     "@capacitor/status-bar": "^7.0.6",
     "@mozilla/readability": "^0.6.0",
+    "@tanstack/react-virtual": "^3.14.23",
     "fts5-sql-bundle": "^1.0.2",
     "hls.js": "^1.7.3",
     "lucide-react": "^1.58.0",

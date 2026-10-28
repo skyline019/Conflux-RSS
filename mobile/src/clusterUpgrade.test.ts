@@ -165,13 +165,25 @@ describe("source-guards-no-truncation-paths", () => {
     expect(startCall).toBeLessThan(seededAwait);
   });
 
-  it("mobile rebuild uses full body and multi-source gate", () => {
+  it("mobile rebuild uses shared clusterCore + full body and multi-source gate", () => {
     const api = readFileSync(join(__dirname, "api.ts"), "utf8");
-    expect(api).toContain("coalesce(content, rss_summary, '') as body");
-    expect(api).not.toMatch(/substr\(coalesce\(content/);
-    expect(api).toContain("feedSet.size < 2");
+    expect(api).toContain("rebuildClustersMobile");
+    expect(api).toContain("analyzeArticleClusterMobile");
+    expect(api).toContain("assignToClusterMobile");
     expect(api).toContain("buildLayer0ForEvent");
     expect(api).toContain("selectCrossFeedArticlesForCompare");
+
+    const mobile = readFileSync(join(__dirname, "clusterMobile.ts"), "utf8");
+    expect(mobile).toContain("coalesce(content, rss_summary, '') as body");
+    expect(mobile).not.toMatch(/substr\(coalesce\(content/);
+    expect(mobile).toContain("linkClustersFromCorpus");
+    expect(mobile).toContain("eventSimilarity");
+    expect(mobile).toContain("Number(stat.sources) < 2");
+
+    const core = readFileSync(join(__dirname, "../../src/lib/clusterCore.ts"), "utf8");
+    expect(core).toContain("buildCandidatePairs");
+    expect(core).toContain("eventSimilarity");
+    expect(core).toContain("distinctFeeds < 2");
   });
 
   it("mobile compare merges batches and enriches with external news", () => {
@@ -189,7 +201,7 @@ describe("source-guards-no-truncation-paths", () => {
   it("diagnostics appVersion comes from package.json", () => {
     const api = readFileSync(join(__dirname, "api.ts"), "utf8");
     const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
-    expect(pkg.version).toBe("0.2.6");
+    expect(pkg.version).toBe("0.2.7");
     expect(api).toContain("APP_VERSION");
     expect(api).toContain('import packageJson from "../package.json"');
     expect(api).not.toMatch(/appVersion:\s*"0\.2\.0"/);

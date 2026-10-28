@@ -1,5 +1,6 @@
 "use client";
 import React, { useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Search, CheckCheck, Star, Layers, Sparkles, Copy, Newspaper, Archive,
   PlayCircle, Images, FileText, ExternalLink, RefreshCw, X, ChevronDown, ChevronUp,
@@ -44,6 +45,13 @@ export default function ArticleList(p: Props) {
   const isMobile =
     typeof window !== "undefined" && Boolean((window as { __CONFLUX_MOBILE__?: boolean }).__CONFLUX_MOBILE__);
   const [externalOpen, setExternalOpen] = useState(!isMobile);
+  const useVirtual = p.articles.length > 40;
+  const rowVirtualizer = useVirtualizer({
+    count: useVirtual ? p.articles.length : 0,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 118,
+    overscan: 10,
+  });
 
   const onTouchStart = (e: React.TouchEvent) => {
     if (!p.onRefresh || p.refreshing) return;
@@ -205,7 +213,17 @@ export default function ArticleList(p: Props) {
           />
         ) : (
           <>
-            {p.articles.map((a, i) => {
+            <div
+              style={
+                useVirtual
+                  ? { height: rowVirtualizer.getTotalSize(), width: "100%", position: "relative" }
+                  : undefined
+              }
+            >
+            {(useVirtual ? rowVirtualizer.getVirtualItems() : p.articles.map((_, i) => ({ index: i, start: 0, key: i, size: 0 }))).map((vrow) => {
+              const i = "index" in vrow ? vrow.index : 0;
+              const a = p.articles[i];
+              if (!a) return null;
               const active = a.id === p.selectedId;
               const ft = FULLTEXT_LABEL[a.fullTextStatus] || FULLTEXT_LABEL.pending;
               const clusterN = a.clusterId ? p.clusterSizes[a.clusterId] : 0;
@@ -213,15 +231,26 @@ export default function ArticleList(p: Props) {
               const imgCount = a.images?.length || (a.imageUrl ? 1 : 0);
               const thumbSrc = a.imageUrl ? proxiedImg(a.imageUrl, a.resolvedLink || a.link) : "";
               const unwrapped = Boolean(a.resolvedLink && a.resolvedLink !== a.link);
+              const virtualStyle = useVirtual
+                ? {
+                    position: "absolute" as const,
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${"start" in vrow ? vrow.start : 0}px)`,
+                  }
+                : { animationDelay: `${Math.min(i, 12) * 28}ms` };
 
               return (
                 <article
                   key={a.id}
+                  data-index={i}
+                  ref={useVirtual ? rowVirtualizer.measureElement : undefined}
                   onClick={() => p.onSelect(a)}
                   className={`anim-fadeUp relative cursor-pointer border-b border-[#ece4cf] px-4 py-3.5 transition hover:bg-[#fffdf8] ${
                     active ? "bg-[#fffdf8]" : ""
                   }`}
-                  style={{ animationDelay: `${Math.min(i, 12) * 28}ms` }}
+                  style={virtualStyle}
                 >
                   {active && <span className="absolute inset-y-0 left-0 w-[3px] bg-[#e85a1e]" />}
                   <div className="flex items-center gap-1.5 text-[11px] text-[#9a917c]">
@@ -348,6 +377,7 @@ export default function ArticleList(p: Props) {
                 </article>
               );
             })}
+            </div>
             {p.hasMore && (
               <button
                 onClick={p.onLoadMore}

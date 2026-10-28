@@ -966,7 +966,7 @@ async function extractFromSingleUrl(url: string): Promise<FullTextResult> {
       const candText = (article.textContent || stripHtml(sanitized.html)).replace(/\n{3,}/g, "\n\n").trim();
       if (countWords(candText) > countWords(text)) {
         title = article.title || title;
-        excerpt = article.excerpt || null;
+      excerpt = article.excerpt || null;
         contentHtml = sanitized.html;
         text = candText;
       }

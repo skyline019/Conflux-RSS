@@ -164,18 +164,29 @@ export default function HomePage() {
       const q = debouncedSearch.trim();
       // Smart aggregate for first page of a search (library + external sections)
       if (q && pageNum === 1 && !append) {
-        const qs = new URLSearchParams({ q, limit: "60", related: filterClusterId ? "0" : "1", external: "1" });
-        let v = "inbox";
-        if (selection.kind === "unread") v = "unread";
-        else if (selection.kind === "starred") v = "starred";
-        else if (selection.kind === "media") v = "media";
-        else if (tab === "unread") v = "unread";
-        else if (tab === "starred") v = "starred";
-        qs.set("view", v);
-        if (selection.kind === "feed") qs.set("feedId", String(selection.id));
-        if (selection.kind === "category") qs.set("category", selection.name);
-        if (filterClusterId) qs.set("clusterId", String(filterClusterId));
-        const res = await fetch(`/api/search/aggregate?${qs}`, { signal: ac.signal });
+        const buildQs = (external: "0" | "1") => {
+          const qs = new URLSearchParams({
+            q,
+            limit: "60",
+            related: filterClusterId ? "0" : "1",
+            external,
+            // Phase-1 skips LLM rewrite on mobile for snappy first paint; phase-2 re-enables
+            llm: mobile && external === "0" ? "0" : "1",
+          });
+          let v = "inbox";
+          if (selection.kind === "unread") v = "unread";
+          else if (selection.kind === "starred") v = "starred";
+          else if (selection.kind === "media") v = "media";
+          else if (tab === "unread") v = "unread";
+          else if (tab === "starred") v = "starred";
+          qs.set("view", v);
+          if (selection.kind === "feed") qs.set("feedId", String(selection.id));
+          if (selection.kind === "category") qs.set("category", selection.name);
+          if (filterClusterId) qs.set("clusterId", String(filterClusterId));
+          return qs;
+        };
+        // Fast path: library fuse without external/network
+        const res = await fetch(`/api/search/aggregate?${buildQs(mobile ? "0" : "1")}`, { signal: ac.signal });
         const data = await res.json() as SearchAggregateResult & { error?: string };
         if (!res.ok) throw new Error(data.error || "搜索失败");
         if (ac.signal.aborted) return;
@@ -189,6 +200,28 @@ export default function HomePage() {
           externalOk: data.meta?.externalOk,
         });
         setPage(1);
+        setListLoading(false);
+        // Phase 2 (mobile): enrich with external + LLM after first paint
+        if (mobile && !ac.signal.aborted) {
+          void (async () => {
+            try {
+              const res2 = await fetch(`/api/search/aggregate?${buildQs("1")}`, { signal: ac.signal });
+              const data2 = await res2.json() as SearchAggregateResult & { error?: string };
+              if (!res2.ok || ac.signal.aborted) return;
+              setArticles(data2.library || []);
+              setTotal(data2.meta?.libraryTotal ?? data2.library?.length ?? 0);
+              setExternalHits(data2.external || []);
+              setSearchEngine(data2.engine || "fts");
+              setSearchMeta({
+                tookMs: data2.meta?.tookMs,
+                llmUsed: data2.meta?.llmUsed,
+                externalOk: data2.meta?.externalOk,
+              });
+            } catch (e) {
+              if (e instanceof DOMException && e.name === "AbortError") return;
+            }
+          })();
+        }
         return;
       }
       if (!q) {
@@ -236,7 +269,12 @@ export default function HomePage() {
       } catch (e) {
         toast(e instanceof Error ? e.message : "初始化失败", "error");
       } finally {
-        if (!cancelled) setBooting(false);
+        if (!cancelled) {
+          setBooting(false);
+          if (isMobileApp()) {
+            window.dispatchEvent(new CustomEvent("confluxBootReady"));
+          }
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -245,7 +283,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => setDebouncedSearch(search), 350);
+    searchTimer.current = setTimeout(() => setDebouncedSearch(search), 500);
   }, [search]);
 
   useEffect(() => {

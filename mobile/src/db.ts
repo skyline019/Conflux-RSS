@@ -179,7 +179,9 @@ function setSchemaVersion(v: number) {
   );
 }
 
-function migrate() {
+/** Returns true if schema/data changed and needs persist. */
+function migrate(): boolean {
+  let changed = false;
   let ver = schemaVersion();
   // v1→v2 media + ai columns (legacy installs)
   if (ver < 2) {
@@ -195,12 +197,14 @@ function migrate() {
     }
     ver = 2;
     setSchemaVersion(2);
+    changed = true;
   }
   // v2→v3 reading progress
   if (ver < 3) {
     ensureColumn("articles", "scroll_offset", "real not null default 0");
     ver = 3;
     setSchemaVersion(3);
+    changed = true;
   }
   // v3→v4 conditional GET validators
   if (ver < 4) {
@@ -208,14 +212,20 @@ function migrate() {
     ensureColumn("feeds", "http_last_modified", "text");
     ver = 4;
     setSchemaVersion(4);
+    changed = true;
   }
   // v4→v5 article FTS5 index
   if (ver < 5) {
     ensureArticlesFts();
     ver = 5;
     setSchemaVersion(5);
+    changed = true;
   }
-  if (ver < SCHEMA_VERSION) setSchemaVersion(SCHEMA_VERSION);
+  if (ver < SCHEMA_VERSION) {
+    setSchemaVersion(SCHEMA_VERSION);
+    changed = true;
+  }
+  return changed;
 }
 
 /** Cached probe: null=unknown, true=FTS5 ok, false=wasm/module lacks FTS5. */
@@ -336,12 +346,17 @@ function scheduleSave() {
 export async function openDatabase() {
   const SQL = await initSqlJs({ locateFile: () => wasmUrl });
   const saved = await idbGet();
+  const fresh = !saved;
   db = saved ? new SQL.Database(saved) : new SQL.Database();
   if (saved) lastExportBytes = saved.byteLength;
   db.exec(SCHEMA);
-  migrate();
-  dirty = true;
-  await saveNow();
+  const migrated = migrate();
+  if (fresh || migrated) {
+    dirty = true;
+    await saveNow();
+  } else {
+    dirty = false;
+  }
 }
 
 export function markDirty() {

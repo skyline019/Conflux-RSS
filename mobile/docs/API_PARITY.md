@@ -34,7 +34,8 @@
 - 发现订阅 `feeds/discover`  
 - 真实事件向搜索质检：mobile vitest `L1-fuzzy-real-event` / `L2-topic-cluster` / `L3-full-dimension`；CJK 单字（如「普」）与网页同 FTS/unigram/fuse  
 - 事件升级质检：`clusterUpgrade.test.ts`（倒排跨源、态度五类、全异源覆盖、无 800/30d 截断；merge+外搜降级）  
-- `GET /api/diagnostics` 的 `appVersion` 读自 `package.json`（当前 **0.2.6**）
+- `GET /api/diagnostics` 的 `appVersion` 读自 `package.json`（当前 **0.2.7**）
+- 聚类：手机 `clusterMobile` 委托共用 `clusterCore`（`buildCandidatePairs` + `eventSimilarity`），与网页算法对齐；入库增量 `assignToClusterMobile`
 
 ## Docker（网页版）
 

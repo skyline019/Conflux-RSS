@@ -1,5 +1,14 @@
 # Changelog（手机端）
 
+## 0.2.7
+
+- **阅读顶栏**：图标返回、暗色工具栏、安全区、底部「更多」sheet（能力不删减）  
+- **后台通知**：单色状态图标、品牌色、Inbox 完成摘要、失败独立通道、停止/继续操作  
+- **聚类**：接入共用 `clusterCore` / `clusterBlocking` / `eventSimilarity`；删除贪心 Jaccard；入库增量归簇  
+- **结构化总结**：共用 `summarizeCore`；内容哈希缓存；流式渐进三段；离线 extractive  
+- **启动**：取消开机全量 FTS/强制 IDB；splash 延至首屏就绪；Vite 拆包  
+- **搜索**：二阶段外搜+LLM；去 clusterView N+1；debounce 500ms；列表虚拟化  
+
 ## 0.2.6
 
 - **修复**：本地库启动 `no such module: fts5` — 改用 `fts5-sql-bundle`（含 FTS5 的 sql.js WASM）；`ensureArticlesFts` 软失败，搜索可降级 LIKE  

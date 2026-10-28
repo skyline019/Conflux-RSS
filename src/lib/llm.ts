@@ -1,5 +1,4 @@
 import { getSettings, llmReady, type AppSettings } from "./app-settings";
-import { extractiveSummary, extractKeywords } from "./text";
 import type { ComparisonResult, SourceView } from "./compareArc";
 import {
   batchFullArticles,
@@ -9,8 +8,23 @@ import {
 } from "./compareArc";
 import { analyzeArticleAttitude } from "./stanceTimeline";
 import { searchNewsCandidateUrlsDetailed } from "./fulltext";
+import {
+  parseJsonLoose,
+  summarizeArticleCore,
+  type SummaryResult,
+} from "./summarizeCore";
 
 export type { ComparisonResult, SourceView } from "./compareArc";
+export {
+  SUM_SYSTEM,
+  SUM_PROMPT_VERSION,
+  parseJsonLoose,
+  summaryFromParsed,
+  tryParsePartialSummary,
+  isSummaryCacheHit,
+  buildExtractiveSummary,
+  type SummaryResult,
+} from "./summarizeCore";
 
 /* ---------------- OpenAI-compatible chat client ---------------- */
 export async function chatComplete(
@@ -46,61 +60,6 @@ export async function chatComplete(
     clearTimeout(timer);
   }
 }
-
-export function parseJsonLoose<T>(text: string): T {
-  let s = String(text).trim();
-  s = s.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-  const first = s.search(/[[{]/);
-  if (first > 0) s = s.slice(first);
-  const lastObj = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
-  if (lastObj > 0) s = s.slice(0, lastObj + 1);
-  try { return JSON.parse(s) as T; } catch { /* retry */ }
-  try {
-    return JSON.parse(s.replace(/,\s*([}\]])/g, "$1")) as T;
-  } catch {
-    throw new Error("大模型返回的 JSON 无法解析");
-  }
-}
-
-export interface SummaryResult {
-  summary: string;
-  keyPoints: string[];
-  keywords: string[];
-  source: "llm" | "extractive";
-  tldr?: string;
-  entities?: { name: string; type?: string; role?: string }[];
-  numbers?: string[];
-  stance?: { tone?: string; label?: string; evidence?: string };
-  quality?: { depth?: number; evidence?: number; novelty?: number; note?: string };
-  questions?: string[];
-  readingTimeMin?: number;
-  background?: string;
-  whatHappened?: string;
-  implications?: string;
-  raw?: Record<string, unknown>;
-}
-
-const SUM_SYSTEM = `你是一名资深新闻编辑与信息分析师。请基于用户提供的文章原文做结构化分析，内容要详实、便于深度阅读。
-要求：
-1. 以原文为依据；可对因果与背景做合理延展，但不得捏造原文未出现的具体数字、日期或引语。信息不足的字段填 null 或空数组。
-2. 用中文输出。
-3. 严格输出 JSON，不要加入任何解释性文字或代码块标记。
-JSON 结构：
-{
-  "tldr": "一句话结论，40字以内",
-  "summary": "300-450字客观详实摘要，涵盖何人/何事/何时/何地/为何与结果",
-  "whatHappened": "80-160字事件经过拆解",
-  "background": "60-140字背景铺垫（前文脉络、相关政策或争议）",
-  "implications": "60-140字影响与可能后续",
-  "bullets": ["要点1","要点2","要点3","要点4","要点5"],
-  "entities": [{"name":"实体","type":"人物|机构|地点|产品|事件","role":"在文中的作用"}],
-  "numbers": ["文中关键数据及含义"],
-  "stance": {"tone":"positive|neutral|negative","label":"倾向描述","evidence":"判断依据原文片段"},
-  "quality": {"depth":1-5,"evidence":1-5,"novelty":1-5,"note":"评价一句话"},
-  "tags": ["标签"],
-  "questions": ["读者延伸追问1","追问2","追问3"],
-  "reading_time_min": 数字
-}`;
 
 /** OpenAI 兼容 SSE 流式；onDelta 收到增量文本 */
 export async function chatStream(
@@ -159,44 +118,6 @@ export async function chatStream(
   return full;
 }
 
-function summaryFromParsed(parsed: {
-  tldr?: string;
-  summary?: string;
-  bullets?: string[];
-  keyPoints?: string[];
-  tags?: string[];
-  keywords?: string[];
-  entities?: { name: string; type?: string; role?: string }[];
-  numbers?: string[];
-  stance?: { tone?: string; label?: string; evidence?: string };
-  quality?: { depth?: number; evidence?: number; novelty?: number; note?: string };
-  questions?: string[];
-  reading_time_min?: number;
-  background?: string;
-  whatHappened?: string;
-  implications?: string;
-}): SummaryResult {
-  const keyPoints = (parsed.bullets || parsed.keyPoints || []).slice(0, 8);
-  const keywords = (parsed.tags || parsed.keywords || []).slice(0, 10);
-  return {
-    summary: parsed.summary || parsed.tldr || "",
-    keyPoints,
-    keywords,
-    source: "llm",
-    tldr: parsed.tldr,
-    entities: parsed.entities,
-    numbers: parsed.numbers,
-    stance: parsed.stance,
-    quality: parsed.quality,
-    questions: parsed.questions,
-    readingTimeMin: parsed.reading_time_min,
-    background: parsed.background,
-    whatHappened: parsed.whatHappened,
-    implications: parsed.implications,
-    raw: parsed as Record<string, unknown>,
-  };
-}
-
 /** 流式总结：边生成边回调，结束后返回结构化结果 */
 export async function summarizeArticleStream(
   title: string,
@@ -205,29 +126,14 @@ export async function summarizeArticleStream(
   settingsOverride?: AppSettings,
 ): Promise<SummaryResult> {
   const s = settingsOverride || (await getSettings());
-  if (!llmReady(s)) {
-    const ex = extractiveSummary(title, body, 3);
-    const fallback: SummaryResult = {
-      summary: ex.summary,
-      keyPoints: ex.keyPoints,
-      keywords: extractKeywords(title, body, 8),
-      source: "extractive",
-      tldr: ex.summary.slice(0, 40),
-      raw: { tldr: ex.summary.slice(0, 40), summary: ex.summary, bullets: ex.keyPoints },
-    };
-    onDelta(JSON.stringify(fallback.raw));
-    return fallback;
-  }
-  const full = await chatStream(
-    [
-      { role: "system", content: `${SUM_SYSTEM}\n注意：请直接开始输出 JSON。` },
-      { role: "user", content: `【标题】${title}\n【正文】\n${body.slice(0, 12000)}` },
-    ],
+  return summarizeArticleCore(title, body, {
+    llmReady: llmReady(s),
     onDelta,
-    { settings: s, maxTokens: 2500 },
-  );
-  const parsed = parseJsonLoose<Parameters<typeof summaryFromParsed>[0]>(full);
-  return summaryFromParsed(parsed);
+    chatStream: (messages, delta, opts) =>
+      chatStream(messages, delta, { settings: s, maxTokens: opts.maxTokens, temperature: opts.temperature }),
+    chatComplete: (messages, opts) =>
+      chatComplete(messages, { settings: s, maxTokens: opts.maxTokens, temperature: opts.temperature }),
+  });
 }
 
 export async function askArticle(
@@ -259,15 +165,11 @@ export async function askArticle(
 
 export async function summarizeArticle(title: string, body: string, settingsOverride?: AppSettings): Promise<SummaryResult> {
   const s = settingsOverride || (await getSettings());
-  if (llmReady(s)) {
-    const raw = await chatComplete([
-      { role: "system", content: SUM_SYSTEM },
-      { role: "user", content: `【标题】${title}\n【正文】\n${body.slice(0, 12000)}` },
-    ], { settings: s, maxTokens: 2500 });
-    return summaryFromParsed(parseJsonLoose(raw));
-  }
-  const ex = extractiveSummary(title, body, 5);
-  return { summary: ex.summary, keyPoints: ex.keyPoints, keywords: extractKeywords(title, body, 8), source: "extractive" };
+  return summarizeArticleCore(title, body, {
+    llmReady: llmReady(s),
+    chatComplete: (messages, opts) =>
+      chatComplete(messages, { settings: s, maxTokens: opts.maxTokens, temperature: opts.temperature }),
+  });
 }
 
 /* ---------------- Multi-source event comparison (same-event full bodies) ---------------- */

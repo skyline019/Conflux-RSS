@@ -3,7 +3,7 @@
 本地优先的 AI RSS 阅读器。数据在 **本机 sql.js**，**不连接电脑 Postgres**。  
 UI 与网页共享（`../src`），请求经 `src/api.ts` 拦截为本地实现。
 
-**当前版本：** 0.2.6 · 包名 `app.conflux.mobile`
+**当前版本：** 0.2.7 · 包名 `app.conflux.mobile`
 
 ## 文档导航
 
@@ -24,7 +24,7 @@ UI 与网页共享（`../src`），请求经 `src/api.ts` 拦截为本地实现�
 cd mobile
 npm install
 npm run keystore      # 仅首次
-npm run apk:release   # → apk/conflux-0.2.6-release.apk
+npm run apk:release   # → apk/conflux-0.2.7-release.apk
 ```
 
 环境：Node 20+、**JDK 21**、Android SDK。详见 [开发指南](./docs/DEVELOPMENT.md)。

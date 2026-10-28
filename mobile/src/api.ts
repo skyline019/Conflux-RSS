@@ -1,6 +1,6 @@
 import { CATALOG, CATALOG_REV } from "../../desktop/catalog.mjs";
 import {
-  all, beginBulkWrite, clearArticlesFts, deleteArticleFtsRow, deleteArticlesFtsForFeed, endBulkWrite, ensureArticlesFts,
+  all, articlesFtsAvailable, beginBulkWrite, clearArticlesFts, deleteArticleFtsRow, deleteArticlesFtsForFeed, endBulkWrite, ensureArticlesFts,
   exec, exportDbBytes, get, getSchemaVersion, openDatabase, replaceDatabase, run, saveNow, upsertArticleFtsRow, type Row,
 } from "./db";
 import { netConditional, netFetch, netText, setRawFetch } from "./net";
@@ -24,7 +24,7 @@ import { countWords, discoverFeeds, extractArticle, parseFeed, strip } from "./r
 import { clearLlmApiKey, getLlmApiKey, setLlmApiKey } from "./secure";
 import packageJson from "../package.json";
 
-const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.5");
+const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.6");
 const COLORS = ["#ee802f", "#2563eb", "#7c3aed", "#059669", "#dc2626", "#0e7490", "#b45309", "#be185d", "#334155"];
 const nowIso = () => new Date().toISOString();
 const sqlText = (value: unknown): string | null => (value == null ? null : String(value));
@@ -182,7 +182,7 @@ function refreshArticleFts(articleId: number) {
 }
 
 function rebuildAllArticleFts() {
-  ensureArticlesFts();
+  if (!ensureArticlesFts()) return;
   clearArticlesFts();
   const ids = all<{ id: number }>("select id from articles");
   for (const row of ids) refreshArticleFts(Number(row.id));
@@ -457,7 +457,7 @@ function listArticles(sp: URLSearchParams) {
   let searchArgs = baseArgs;
   let useFts = false;
   const matchExpr = parsed ? buildFtsMatchExpression(parsed) : null;
-  if (search && matchExpr) {
+  if (search && matchExpr && articlesFtsAvailable()) {
     try {
       searchWhere = [...baseWhere, "fts match ?"];
       searchArgs = [...baseArgs, matchExpr];

@@ -1,4 +1,4 @@
-declare module "sql.js" {
+declare module "fts5-sql-bundle" {
   export type SqlValue = string | number | null | Uint8Array;
   export interface QueryExecResult {
     columns: string[];
@@ -7,11 +7,11 @@ declare module "sql.js" {
   export interface Statement {
     bind(params?: SqlValue[]): boolean;
     step(): boolean;
-    getAsObject(): Record<string, SqlValue>;
+    getAsObject(params?: SqlValue[]): Record<string, SqlValue>;
     free(): void;
   }
   export interface Database {
-    run(sql: string, params?: SqlValue[]): Database;
+    run(sql: string, params?: SqlValue[]): void;
     exec(sql: string): QueryExecResult[];
     prepare(sql: string): Statement;
     getRowsModified(): number;
@@ -21,10 +21,11 @@ declare module "sql.js" {
   export interface SqlJsStatic {
     Database: new (data?: ArrayLike<number> | Buffer | null) => Database;
   }
-  export interface InitOptions {
+  export interface InitSqlJsOptions {
     locateFile?: (file: string) => string;
   }
-  export default function initSqlJs(config?: InitOptions): Promise<SqlJsStatic>;
+  export default function initSqlJs(config?: InitSqlJsOptions): Promise<SqlJsStatic>;
+  export function initSqlJs(config?: InitSqlJsOptions): Promise<SqlJsStatic>;
 }
 
 declare module "*.wasm?url" {

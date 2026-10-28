@@ -47,5 +47,10 @@ export default defineConfig({
     },
     dedupe: ["react", "react-dom", "lucide-react"],
   },
+  optimizeDeps: {
+    // CJS wrapper that loads dist/sql-wasm.js + FTS5 wasm
+    include: ["fts5-sql-bundle"],
+  },
+  assetsInclude: ["**/*.wasm"],
   server: { port: 5176, strictPort: true },
 });

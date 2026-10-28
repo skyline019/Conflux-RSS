@@ -189,7 +189,7 @@ describe("source-guards-no-truncation-paths", () => {
   it("diagnostics appVersion comes from package.json", () => {
     const api = readFileSync(join(__dirname, "api.ts"), "utf8");
     const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { version: string };
-    expect(pkg.version).toBe("0.2.5");
+    expect(pkg.version).toBe("0.2.6");
     expect(api).toContain("APP_VERSION");
     expect(api).toContain('import packageJson from "../package.json"');
     expect(api).not.toMatch(/appVersion:\s*"0\.2\.0"/);

@@ -390,7 +390,7 @@ export default function SettingsView({ onSettingsChanged }: { onSettingsChanged:
             <Section
               icon={<Smartphone size={16} className="text-[#e85a1e]" />}
               title="手机端 · 日常与备份"
-              desc="0.2.5：底部 Tab 直达。后台 WorkManager 抓取（最短约 15 分钟）与前台刷新互斥；完成通知可含新增篇数。"
+              desc="0.2.6：本地库 FTS5 搜索；底部 Tab 直达。后台 WorkManager 抓取（最短约 15 分钟）与前台刷新互斥；完成通知可含新增篇数。"
             >
               <Slider
                 label="后台静默刷新间隔" value={refreshMins} min={0} max={360} step={15}

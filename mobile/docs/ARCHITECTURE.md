@@ -2,7 +2,7 @@
 
 ## 一句话
 
-汇阅手机端 = **Capacitor Android WebView** + **共享 React UI** + **本地 fetch 拦截 API** + **sql.js（IndexedDB 持久化）**。不连接电脑上的 Postgres。
+汇阅手机端 = **Capacitor Android WebView** + **共享 React UI** + **本地 fetch 拦截 API** + **fts5-sql-bundle（sql.js + FTS5，IndexedDB 持久化）**。不连接电脑上的 Postgres。
 
 ## 运行时结构
 
@@ -19,7 +19,7 @@
 │  │         mobile/src/api.ts               │  │
 │  │    read.ts / net.ts / secure.ts         │  │
 │  │              ↓                          │  │
-│  │     sql.js ←→ IndexedDB (kv/sqlite)     │  │
+│  │  fts5-sql-bundle ←→ IndexedDB (sqlite)  │  │
 │  └───────────────────────────────────────┘  │
 └─────────────────────────────────────────────┘
          │ HTTPS（默认禁明文）
@@ -33,7 +33,7 @@
 |------|------|
 | `main.tsx` | 启动：开库 → 原生壳 → 挂载页面 → 藏 Splash |
 | `src/api.ts` | 本地 `/api/*` 实现（与网页能力对齐） |
-| `src/db.ts` | sql.js + schema 版本迁移 |
+| `src/db.ts` | fts5-sql-bundle + schema 版本迁移（`articles_fts`） |
 | `src/read.ts` | RSS 解析、全文抽取、YT/B 站专项 |
 | `src/net.ts` | 原生/Dev 代理网络 |
 | `src/secure.ts` | LLM Key → Preferences |
@@ -69,8 +69,8 @@
 | 选择 | 原因 |
 |------|------|
 | 与网页同 UI | 功能一次写、两端用；手机用 `__CONFLUX_MOBILE__` 与原生事件桥接 |
-| sql.js 而非 Postgres | 离线、免服务器、符合「数据在本机」 |
-| WorkManager + 前台服务刷新 | 定时唤醒后起 FGS，跑同一套 sql.js 刷新流；通知展示进度/完成 |
+| fts5-sql-bundle 而非官方 sql.js / Postgres | 官方 sql.js WASM 无 FTS5；本包带 FTS5，离线免服务器 |
+| WorkManager + 前台服务刷新 | 定时唤醒后起 FGS，跑同一套本地刷新流；通知展示进度/完成 |
 | 自适应落盘 | 大库拉长 debounce / 最小间隔；全量刷新批量写完再 `saveNow` |
 | fetch SSE 而非 EventSource | EventSource 绕过拦截器，手机本地 API 收不到 |
 
@@ -81,4 +81,5 @@
 - v2：媒体与 `ai_json` 等列  
 - v3：`scroll_offset` 阅读进度  
 - v4：`feeds.http_etag` / `http_last_modified`（条件 GET）  
+- v5：`articles_fts`（FTS5；无模块时软失败，搜索降级 LIKE）  
 

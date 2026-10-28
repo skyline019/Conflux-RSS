@@ -7,7 +7,7 @@ import { ErrorBoundary } from "./src/ErrorBoundary";
 import HomePage from "../src/app/page";
 import packageJson from "./package.json";
 
-const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.5");
+const APP_VERSION = String((packageJson as { version?: string }).version || "0.2.6");
 
 (window as { __CONFLUX_MOBILE__?: boolean }).__CONFLUX_MOBILE__ = true;
 const rawFetch = window.fetch.bind(window);

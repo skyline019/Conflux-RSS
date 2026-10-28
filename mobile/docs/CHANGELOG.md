@@ -1,5 +1,9 @@
 # Changelog（手机端）
 
+## 0.2.6
+
+- **修复**：本地库启动 `no such module: fts5` — 改用 `fts5-sql-bundle`（含 FTS5 的 sql.js WASM）；`ensureArticlesFts` 软失败，搜索可降级 LIKE  
+
 ## 0.2.5
 
 - **壳层**：Tab 高度常量统一；抽屉/Modal 高于 TabBar；离线条不挡标题；Network 事件驱动在线态；暗色同步 StatusBar + TabBar  

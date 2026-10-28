@@ -1,5 +1,5 @@
-import initSqlJs, { type Database } from "sql.js";
-import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
+import initSqlJs, { type Database } from "fts5-sql-bundle";
+import wasmUrl from "fts5-sql-bundle/dist/sql-wasm.wasm?url";
 
 const SCHEMA_VERSION = 5;
 
@@ -218,6 +218,9 @@ function migrate() {
   if (ver < SCHEMA_VERSION) setSchemaVersion(SCHEMA_VERSION);
 }
 
+/** Cached probe: null=unknown, true=FTS5 ok, false=wasm/module lacks FTS5. */
+let ftsSupported: boolean | null = null;
+
 function ftsExists(): boolean {
   try {
     const row = get<{ n: number }>("select count(*) as n from sqlite_master where type = 'table' and name = 'articles_fts'");
@@ -227,10 +230,29 @@ function ftsExists(): boolean {
   }
 }
 
-/** Create FTS5 table if missing (tokenized docs filled by api upsert/rebuild). */
-export function ensureArticlesFts() {
-  if (!ftsExists()) {
+/** True when `articles_fts` is present (search can use MATCH/bm25). */
+export function articlesFtsAvailable(): boolean {
+  return ftsExists();
+}
+
+/**
+ * Create FTS5 table if missing. Soft-fails when the SQLite build has no FTS5
+ * so local DB boot never hard-crashes (API search falls back to LIKE).
+ */
+export function ensureArticlesFts(): boolean {
+  if (ftsExists()) {
+    ftsSupported = true;
+    return true;
+  }
+  if (ftsSupported === false) return false;
+  try {
     db.run(`create virtual table articles_fts using fts5(doc, tokenize = 'unicode61')`);
+    ftsSupported = true;
+    return true;
+  } catch (err) {
+    ftsSupported = false;
+    console.warn("[db] FTS5 unavailable, search will use LIKE:", err);
+    return false;
   }
 }
 
@@ -239,11 +261,15 @@ export function clearArticlesFts() {
 }
 
 export function upsertArticleFtsRow(articleId: number, doc: string) {
-  ensureArticlesFts();
+  if (!ensureArticlesFts()) return;
   try {
     db.run("delete from articles_fts where rowid = ?", [articleId]);
   } catch { /* ignore */ }
-  db.run("insert into articles_fts(rowid, doc) values(?, ?)", [articleId, doc || ""]);
+  try {
+    db.run("insert into articles_fts(rowid, doc) values(?, ?)", [articleId, doc || ""]);
+  } catch (err) {
+    console.warn("[db] FTS upsert skipped:", err);
+  }
 }
 
 export function deleteArticleFtsRow(articleId: number) {
@@ -354,6 +380,7 @@ export function exportDbBytes(): Uint8Array {
 export async function replaceDatabase(bytes: Uint8Array) {
   const SQL = await initSqlJs({ locateFile: () => wasmUrl });
   db.close();
+  ftsSupported = null;
   db = new SQL.Database(bytes);
   lastExportBytes = bytes.byteLength;
   db.exec(SCHEMA);
